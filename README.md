@@ -43,7 +43,7 @@ cannif will automatically try to start an Annif REST server running at `http://l
 
 When connected, it presents an interactive table of projects and their details.  The table can be downloaded as a CSV file.
 
-![a screenshot](https://github.com/mjsuhonos/Annif-corpora/blob/master/cannif/cannif.png?raw=true)
+![a screenshot](https://github.com/mjsuhonos/cannif/blob/main/images/cannif.png?raw=true)
 
 ### creating projects
 
@@ -61,7 +61,7 @@ Vocabularies can be loaded for a project by entering a vocab ID and a language, 
 
 When you select a project in the table, details about that project and its backend appear below the table.
 
-![a screenshot](https://github.com/mjsuhonos/Annif-corpora/blob/master/cannif/project.png?raw=true)
+![a screenshot](https://github.com/mjsuhonos/cannif/blob/main/images/project.png?raw=true)
 
 Updating project configuration is coming!
 
@@ -75,7 +75,7 @@ Projects can be evaluated by uploading an evaluation corpus file.  Evluation is 
 
 Cannif looks for evaluation information in the `data/eval` directory.  JSON files in the Annif `--metrics-file` format will be used if they match the name of a project_id.
 
-![a screenshot](https://github.com/mjsuhonos/Annif-corpora/blob/master/cannif/metrics.png?raw=true)
+![a screenshot](https://github.com/mjsuhonos/cannif/blob/main/images/metrics.png?raw=true)
 
 ## that's all folks
 
