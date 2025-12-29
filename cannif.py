@@ -196,7 +196,7 @@ def list_projects(projects):
                             "false_positive_rate": "FPR",
                             "false_negative_rate": "FNR"})
             
-            with st.expander("**Comparative Metrics**", expanded=False, icon=":material/bar_chart:"):
+            with st.expander("**Metrics**", expanded=False, icon=":material/bar_chart:"):
 
                 col1, col2, col3 = st.columns(3)
                 with col1:
