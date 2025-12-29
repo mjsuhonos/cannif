@@ -5,6 +5,7 @@ import re
 import os
 import json
 import subprocess
+import threading
 import time
 
 from annif.config import find_config
@@ -18,14 +19,33 @@ UPLOADS_DIR = "uploads"
 DATA_DIR = "data"
 EVAL_DIR = "data/eval"
 
-@st.cache_resource()
-def get_persistent_process(command: list):
-    return subprocess.Popen(
-        command,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True
-    )
+# Singleton to contain process handles
+@st.cache_resource
+def get_process_registry():
+    return { "processes": {}, "lock": threading.Lock() }
+
+process_registry = get_process_registry()
+
+def start_process(key, command):
+    with process_registry["lock"]:
+        if key not in process_registry["processes"]:
+            proc = subprocess.Popen(
+                command,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                bufsize=1
+            )
+
+def get_process(key):
+    with process_registry["lock"]:
+        return process_registry["processes"].get(key)
+
+def terminate_process(key):
+    p = get_process(key)
+    p.terminate()
+    p.wait()
+    del process_registry["processes"][key]
 
 def api_request(url):
     def service_is_up():
@@ -43,7 +63,7 @@ def api_request(url):
     
     # Try to run Annif server
     st.info(f"Loading Annif...", icon=":material/hourglass:")
-    process = get_persistent_process(ANNIF_RUN)
+    start_process('annif', ANNIF_RUN)
 
     for _ in range(30):  # Wait for ~90 seconds
         if service_is_up():
@@ -370,11 +390,9 @@ def project_form(project):
             if os.path.exists(test_path):
                 os.remove(test_path)
 
-            # Kill Annif and restart it
-            if process := get_persistent_process(ANNIF_RUN):
-                process.kill()
-                process.wait()
-                get_persistent_process.clear(ANNIF_RUN)
+            # Restart Annif
+            terminate_process('annif')
+            start_process('annif', ANNIF_RUN)
 
             st.success("Project created successfully!")
             st.rerun()
@@ -427,14 +445,14 @@ def upload_action(project_id, action):
     # TODO: use something more robust to mint IDs
     task_id = f"{project_id}_{action}".lower().replace(" ", "_")
 
-    def is_task_running(task_id):
-        proc = st.session_state.get(task_id)
-        if proc is None:
-            return False
-        return proc.poll() is None
+    #def is_task_running(task_id):
+    #    proc = process_registry.get(task_id)
+    #    if proc is None:
+    #        return False
+    #    return proc.poll() is None
 
     # Show status
-    if is_task_running(task_id):
+    if process_registry.get(task_id):
         st.info(f"{action} is running", icon=":material/hourglass:")
         return
 
@@ -488,12 +506,12 @@ def upload_action(project_id, action):
                     st.code(e.stderr)
 
         elif "Train" == action:
-            st.session_state[task_id] = get_persistent_process(ANNIF_CMD + ["train", project_id, source_path])
+            start_process(task_id, ANNIF_CMD + ["train", project_id, source_path])
             st.info(f"{action} is running", icon=":material/hourglass:")
 
         elif "Evaluate" == action:
             dest_path = os.path.join(os.getcwd(), EVAL_DIR, project_id + ".json")
-            st.session_state[task_id] = get_persistent_process(ANNIF_CMD + ["eval", project_id, source_path, "-M", dest_path])
+            start_process(task_id, ANNIF_CMD + ["eval", project_id, source_path, "-M", dest_path])
             st.info(f"{action} is running", icon=":material/hourglass:")
 
         else:
@@ -643,7 +661,7 @@ def main():
         st.caption(f"Annif {version} at {ANNIF_API}")
     else:
         exit()
-    
+
     new_buttons()
 
     projects = get_projects()
