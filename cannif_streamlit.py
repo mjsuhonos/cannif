@@ -7,6 +7,7 @@ import json
 import subprocess
 import threading
 import time
+import tempfile
 
 from annif.config import find_config
 from annif.registry import AnnifRegistry
@@ -15,9 +16,7 @@ ANNIF_API = "http://127.0.0.1:5000/v1"
 ANNIF_CMD = ["annif"]
 ANNIF_RUN = ANNIF_CMD + ["run", "--host", "0.0.0.0"]
 
-UPLOADS_DIR = "uploads"
 DATA_DIR = "data"
-EVAL_DIR = "data/eval"
 
 # Singleton to contain process handles
 @st.cache_resource
@@ -29,7 +28,7 @@ process_registry = get_process_registry()
 def start_process(key, command):
     with process_registry["lock"]:
         if key not in process_registry["processes"]:
-            proc = subprocess.Popen(
+            process_registry["processes"][key] = subprocess.Popen(
                 command,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
@@ -122,7 +121,7 @@ def get_projects():
                 })
 
         # add evaluation metrics if they exist
-        filepath = os.path.join(os.getcwd(), EVAL_DIR, project_id + ".json")
+        filepath = os.path.join(os.getcwd(), DATA_DIR, 'eval', project_id + ".json")
 
         try:
             metrics = json.load(open(filepath, 'r'))
@@ -384,17 +383,10 @@ def project_form(project):
             project['project_id'] = f"{project.get('vocab')}_{project.get('language')}_{project.get('backend')}".lower().replace(" ", "_")
 
             save_project(project)
-
-            test_path = os.path.join(os.getcwd(), find_config(), f"{project.get('vocab')}_{project.get('language')}_load_vocab.cfg")
-
-            if os.path.exists(test_path):
-                os.remove(test_path)
-
-            # Restart Annif
-            terminate_process('annif')
-            start_process('annif', ANNIF_RUN)
-
             st.success("Project created successfully!")
+
+            # Stop Annif and restart
+            terminate_process('annif')
             st.rerun()
 
     #elif "dummy" == backend:
@@ -459,12 +451,11 @@ def upload_action(project_id, action):
     uploaded_file = st.file_uploader("**Upload File**", key=f"{task_id}_file",
                                     type=["tsv", "csv", "json", "jsonl"])
 
-    # Save file to uploads folder
+    # Save upload as temporary file
     if uploaded_file:
-        base, ext = os.path.splitext(uploaded_file.name)
-        file_path = os.path.join(UPLOADS_DIR, f"{task_id}{ext}")
-        with open(file_path, "wb") as f:
-            f.write(uploaded_file.getbuffer())
+        with tempfile.NamedTemporaryFile(delete=False) as tmp:
+                tmp.write(uploaded_file.read())
+                tmp_path = tmp.name
 
     placeholder = st.empty()
 
@@ -473,7 +464,7 @@ def upload_action(project_id, action):
             st.error("No file uploaded")
             return
 
-        source_path = os.path.join(os.getcwd(), UPLOADS_DIR, f"{task_id}{ext}")
+        source_path = os.path.join(os.getcwd(), tmp_path)
 
         if "Load Vocab" == action:
             vocab_id, lang = project_id.split('_', 1)
@@ -500,6 +491,13 @@ def upload_action(project_id, action):
                         ANNIF_CMD + ["load-vocab", "-L", lang, vocab_id, source_path],
                         capture_output=True, text=True, check=True)
                     st.success("Vocab loaded successfully!")
+                    
+                    os.remove(proj_path)
+                    
+                    #test_path = os.path.join(os.getcwd(), find_config(), f"{project.get('vocab')}_{project.get('language')}_load_vocab.cfg")
+                    #if os.path.exists(test_path):
+                    #    os.remove(test_path)
+                    
 
                 except subprocess.CalledProcessError as e:
                     st.error("Error loading vocab:")
@@ -510,7 +508,7 @@ def upload_action(project_id, action):
             st.info(f"{action} is running", icon=":material/hourglass:")
 
         elif "Evaluate" == action:
-            dest_path = os.path.join(os.getcwd(), EVAL_DIR, project_id + ".json")
+            dest_path = os.path.join(os.getcwd(), DATA_DIR, EVAL_DIR, project_id + ".json")
             start_process(task_id, ANNIF_CMD + ["eval", project_id, source_path, "-M", dest_path])
             st.info(f"{action} is running", icon=":material/hourglass:")
 
