@@ -46,6 +46,12 @@ def terminate_process(key):
     p.wait()
     del process_registry["processes"][key]
 
+def cleanup_finished_processes():
+    with process_registry["lock"]:
+        done = [tid for tid, p in process_registry["processes"].items() if p.poll() is not None]
+        for tid in done:
+            del process_registry["processes"][tid]
+
 def api_request(url):
     def service_is_up():
         try:
@@ -84,7 +90,7 @@ def get_projects():
 
     projects = {p.get("project_id"): p for p in api_projects}
 
-    # use Annif module to get values not available from API
+    # Use Annif module to get values not available from API
     try:
         registry = AnnifRegistry(
             projects_config_path=find_config(),
@@ -437,12 +443,6 @@ def upload_action(project_id, action):
     # TODO: use something more robust to mint IDs
     task_id = f"{project_id}_{action}".lower().replace(" ", "_")
 
-    #def is_task_running(task_id):
-    #    proc = process_registry.get(task_id)
-    #    if proc is None:
-    #        return False
-    #    return proc.poll() is None
-
     # Show status
     if process_registry.get(task_id):
         st.info(f"{action} is running", icon=":material/hourglass:")
@@ -491,13 +491,8 @@ def upload_action(project_id, action):
                         ANNIF_CMD + ["load-vocab", "-L", lang, vocab_id, source_path],
                         capture_output=True, text=True, check=True)
                     st.success("Vocab loaded successfully!")
-                    
+
                     os.remove(proj_path)
-                    
-                    #test_path = os.path.join(os.getcwd(), find_config(), f"{project.get('vocab')}_{project.get('language')}_load_vocab.cfg")
-                    #if os.path.exists(test_path):
-                    #    os.remove(test_path)
-                    
 
                 except subprocess.CalledProcessError as e:
                     st.error("Error loading vocab:")
@@ -523,20 +518,6 @@ def upload_action(project_id, action):
         placeholder.write(' ')
 
 def save_project(project):
-    '''
-    {
-      "project_id": "my-project",
-      "name": "My Project",
-      "language": "en",
-      "backend": {
-        "backend_id": "my-backend"
-      },
-      "vocab": {
-        "vocab_id": "yso",
-      },
-      "vocab_language": "en",
-    }
-    '''
     # TODO: check required values
     project_id = project.get('project_id')
     name = project.get('name')
@@ -634,7 +615,7 @@ def backend_form(project, keys):
             st.json(response)
             #save_project(response)
 
-def new_buttons():
+def new_project():
     @st.dialog("New Project")
     def project_modal():
         project_form({'is_new': True})
@@ -660,7 +641,7 @@ def main():
     else:
         exit()
 
-    new_buttons()
+    new_project()
 
     projects = get_projects()
 
@@ -669,6 +650,8 @@ def main():
     project_details(projects)
 
     st.caption(f"{len(projects)} projects")
+    
+    cleanup_finished_processes()
 
 if __name__ == "__main__":
     main()
