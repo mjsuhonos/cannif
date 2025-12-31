@@ -42,15 +42,57 @@ def get_process(key):
 
 def terminate_process(key):
     p = get_process(key)
-    p.terminate()
-    p.wait()
-    del process_registry["processes"][key]
+    if p:
+        p.terminate()
+        p.wait()
+        with process_registry["lock"]:
+            del process_registry["processes"][key]
 
-def cleanup_finished_processes():
+def process_dashboard():
     with process_registry["lock"]:
-        done = [tid for tid, p in process_registry["processes"].items() if p.poll() is not None]
-        for tid in done:
-            del process_registry["processes"][tid]
+        items = list(process_registry["processes"].items())
+
+    if not items:
+        return
+
+    with st.expander("**Tasks**", expanded=False, icon=":material/manage_history:"):
+        for key, proc in items:
+            rc = proc.poll()
+
+            with st.container():
+                col1, col2, col3, col4 = st.columns([1,2,1,10])
+                
+                with col1:
+                    st.write(proc.pid)
+
+                with col2:
+                    if rc is None:
+                        st.badge("running")
+                    elif rc == 0:
+                        st.badge("finished", color='green')
+                    else:
+                        st.badge(f"failed (code {rc})", color='red')
+
+                with col3:
+
+                    if st.button('', icon=":material/close:", type="secondary", key=key):
+                        terminate_process(key)
+                        st.rerun()
+
+                with col4:
+                    st.write(f"**{key}**")
+
+                    if rc is not None:
+                        # TODO: save these to the process registry once pipes are drained
+                        stdout = proc.stdout.read() if proc.stdout else ""
+                        stderr = proc.stderr.read() if proc.stderr else ""
+
+                        if stdout:
+                            with st.expander("**stdout:**"):
+                                st.code(stdout)
+                        if stderr:
+                            with st.expander("**stderr:**"):
+                                st.code(stderr)
 
 def api_request(url):
     def service_is_up():
@@ -68,7 +110,7 @@ def api_request(url):
     
     # Try to run Annif server
     st.info(f"Loading Annif...", icon=":material/hourglass:")
-    start_process('annif', ANNIF_RUN)
+    start_process('Annif', ANNIF_RUN)
 
     for _ in range(30):  # Wait for ~90 seconds
         if service_is_up():
@@ -189,6 +231,7 @@ def list_projects(projects):
                     selection_mode="single-row", on_select="rerun")
 
         # if there are metrics, show graphs
+        # TODO: encapsulate this and move to main() below project details
         if df["F1@5"].notna().any():
             df = df.set_index("name").dropna(subset=["F1@5"])
             df = df.rename(columns={
@@ -392,7 +435,7 @@ def project_form(project):
             st.success("Project created successfully!")
 
             # Stop Annif and restart
-            terminate_process('annif')
+            terminate_process('Annif')
             st.rerun()
 
     #elif "dummy" == backend:
@@ -440,16 +483,16 @@ def show_bar_chart(data):
     st.bar_chart(df, horizontal=True, sort=False)
 
 def upload_action(project_id, action):
-    # TODO: use something more robust to mint IDs
-    task_id = f"{project_id}_{action}".lower().replace(" ", "_")
+    task_id = f"{action} {project_id}"
 
     # Show status
-    if process_registry.get(task_id):
+    # TODO: if evaluate failed, show that
+    if get_process(task_id):
         st.info(f"{action} is running", icon=":material/hourglass:")
         return
 
     uploaded_file = st.file_uploader("**Upload File**", key=f"{task_id}_file",
-                                    type=["tsv", "csv", "json", "jsonl"])
+                                    type=["tsv", "csv", "json", "jsonl", "ttl", "nt"])
 
     # Save upload as temporary file
     if uploaded_file:
@@ -503,7 +546,7 @@ def upload_action(project_id, action):
             st.info(f"{action} is running", icon=":material/hourglass:")
 
         elif "Evaluate" == action:
-            dest_path = os.path.join(os.getcwd(), DATA_DIR, EVAL_DIR, project_id + ".json")
+            dest_path = os.path.join(os.getcwd(), DATA_DIR, 'eval', project_id + ".json")
             start_process(task_id, ANNIF_CMD + ["eval", project_id, source_path, "-M", dest_path])
             st.info(f"{action} is running", icon=":material/hourglass:")
 
@@ -648,10 +691,10 @@ def main():
     list_projects(projects)
 
     project_details(projects)
+    
+    process_dashboard()
 
     st.caption(f"{len(projects)} projects")
-    
-    cleanup_finished_processes()
 
 if __name__ == "__main__":
     main()
