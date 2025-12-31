@@ -71,7 +71,7 @@ Projects can be trained by uploading a training corpus file.  Training is starte
 
 ### evaluation
 
-Projects can be evaluated by uploading an evaluation corpus file.  Evluation is started in the background.  When a project has been evaluated, metrics will appear in both the project details and in a series of comparative charts.  
+Projects can be evaluated by uploading an evaluation corpus file.  Evaluation is started in the background.  When a project has been evaluated, metrics will appear in both the project details and in a series of comparative charts.  
 
 Cannif looks for evaluation information in the `data/eval` directory.  JSON files in the Annif `--metrics-file` format will be used if they match the name of a project_id.
 

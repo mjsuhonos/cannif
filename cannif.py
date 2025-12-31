@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import requests
 import re
+import sys
 import os
 import json
 import subprocess
@@ -28,25 +29,115 @@ process_registry = get_process_registry()
 def start_process(key, command):
     with process_registry["lock"]:
         if key not in process_registry["processes"]:
-            process_registry["processes"][key] = subprocess.Popen(
+            p = subprocess.Popen(
                 command,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
                 bufsize=1
             )
+            process_registry["processes"][key] = {
+                "process": p,
+                "stdout": None,
+                "stderr": None,
+                "usage": None,
+                "status": None
+            }
 
 def get_process(key):
     with process_registry["lock"]:
-        return process_registry["processes"].get(key)
+        entry = process_registry["processes"].get(key)
+        if not entry:
+            return None
+
+        p = entry["process"]
+
+        try:
+            pid, status, rusage = os.wait4(p.pid, os.WNOHANG)
+            if pid != 0: # process finished
+                entry["usage"] = rusage
+                entry["status"] = status
+
+                # capture stdout/stderr
+                if entry["stdout"] is None and p.stdout:
+                    entry["stdout"] = p.stdout.read()
+                    p.stdout.close()
+                if entry["stderr"] is None and p.stderr:
+                    entry["stderr"] = p.stderr.read()
+                    p.stderr.close()
+
+        except ChildProcessError:
+            pass
+
+        return entry
 
 def terminate_process(key):
-    p = get_process(key)
-    if p:
+    entry = get_process(key)
+    if entry:
+        p = entry["process"]
         p.terminate()
         p.wait()
         with process_registry["lock"]:
             del process_registry["processes"][key]
+
+def process_exit_info(entry):
+    status_val = entry.get("status")
+    if status_val is None:
+        return None
+
+    if os.WIFEXITED(status_val):
+        return os.WEXITSTATUS(status_val)
+
+    # Terminated by signal or stopped → treat as failed (None or a sentinel)
+    return -1
+
+def compact_count(n):
+    # Format integer counts like 1.2K / 3.4M / 5.6B
+    try:
+        import humanize
+        text = humanize.intword(n, format="%.1f")
+        return (
+            text.replace(" thousand", "K")
+                .replace(" million", "M")
+                .replace(" billion", "B")
+                .replace(" trillion", "T")
+        )
+    except Exception:
+        return str(n)
+
+def compact_bytes(n):
+    # Format bytes as a readable size.
+    try:
+        import humanize
+        return humanize.naturalsize(n, format="%.1f")
+    except Exception:
+        return str(n)
+
+def format_seconds(sec):
+    # Convert seconds to H:M:S style
+    try:
+        import humanize
+        return humanize.naturaldelta(sec)
+    except Exception:
+        return f"{sec:.1f}s"
+
+def render_usage(entry):
+    usage = entry.get("usage")
+    if not usage:
+        return
+
+    rss = usage.ru_maxrss
+    if sys.platform.startswith("linux"):
+        rss *= 1024  # KB → bytes on Linux
+
+    nice_rss = compact_bytes(rss)
+    nice_utime = format_seconds(usage.ru_utime)
+    nice_stime = format_seconds(usage.ru_stime)
+
+    col1, col2, col3 = st.columns(3)
+    col1.caption(f"User CPU: {nice_utime}")
+    col2.caption(f"System CPU: {nice_stime}")
+    col3.caption(f"Max RSS: {nice_rss}")
 
 def process_dashboard():
     with process_registry["lock"]:
@@ -56,12 +147,18 @@ def process_dashboard():
         return
 
     with st.expander("**Tasks**", expanded=False, icon=":material/manage_history:"):
-        for key, proc in items:
-            rc = proc.poll()
+        for key, entry in items:
+            # Refresh process status, usage, stdout/stderr
+            entry = get_process(key)
+            if not entry:
+                continue
+
+            proc = entry["process"]
+            exit_code = process_exit_info(entry)
 
             with st.container():
-                col1, col2, col3, col4 = st.columns([1,1.5,2,12])
-                
+                col1, col2, col3, col4 = st.columns([1, 1.5, 2, 12])
+
                 with col1:
                     if st.button('', icon=":material/close:", type="secondary", key=key):
                         terminate_process(key)
@@ -71,27 +168,27 @@ def process_dashboard():
                     st.write(proc.pid)
 
                 with col3:
-                    if rc is None:
+                    if exit_code is None:
                         st.badge("running")
-                    elif rc == 0:
-                        st.badge("finished", color='green')
+                    elif exit_code == 0:
+                        st.badge("finished", color="green")
                     else:
-                        st.badge(f"failed (code {rc})", color='red')
+                        text = "failed" if exit_code == -1 else f"failed (code {exit_code})"
+                        st.badge(text, color="red")
 
                 with col4:
                     st.write(f"**{key}**")
 
-                    if rc is not None:
-                        # TODO: save these to the process registry once pipes are drained
-                        stdout = proc.stdout.read() if proc.stdout else ""
-                        stderr = proc.stderr.read() if proc.stderr else ""
+                    if exit_code is not None:
+                        render_usage(entry)
 
-                        if stdout:
-                            with st.expander("Output", icon=":material/output:"):
-                                st.code(stdout)
-                        if stderr:
-                            with st.expander("Errors", icon=":material/breaking_news:"):
-                                st.code(stderr)
+                    # stdout/stderr content
+                    if stdout:= entry["stdout"]:
+                        with st.expander("Output", icon=":material/output:"):
+                            st.code(stdout)
+                    if stderr:= entry["stderr"]:
+                        with st.expander("Errors", icon=":material/breaking_news:"):
+                            st.code(stderr)
 
 def api_request(url):
     def service_is_up():
@@ -322,11 +419,7 @@ def vocab_form(project):
         lang_id = st.selectbox("**Language**", codes, index=index, disabled=disabled, accept_new_options=True)
 
         if is_loaded:
-            try:
-                from readable_number import ReadableNumber
-                size = ReadableNumber(vocab.get('size'), use_shortform=True)
-            except:
-                size = vocab.get('size')
+            size = compact_count(vocab.get('size'))
             st.write(f"**Terms:** {size}")
             
             project['vocab'] = vocab_id
@@ -450,12 +543,7 @@ def eval_results(project):
     if project.get("F1@5"):
         st.subheader("Evaluation", divider="grey")
         
-        try:
-            from readable_number import ReadableNumber
-            numdocs = ReadableNumber(project.get('Documents_evaluated'), use_shortform=True)
-        except:
-            numdocs = project.get('Documents_evaluated')
-
+        numdocs = compact_count(project.get('Documents_evaluated'))
         st.write(f"**Documents Evaluated:** {numdocs}")
 
         data = {"Cutoff": ["@1", "@3", "@5"],
