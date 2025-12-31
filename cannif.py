@@ -60,24 +60,23 @@ def process_dashboard():
             rc = proc.poll()
 
             with st.container():
-                col1, col2, col3, col4 = st.columns([1,2,1,10])
+                col1, col2, col3, col4 = st.columns([1,1.5,2,12])
                 
                 with col1:
-                    st.write(proc.pid)
+                    if st.button('', icon=":material/close:", type="secondary", key=key):
+                        terminate_process(key)
+                        st.rerun()
 
                 with col2:
+                    st.write(proc.pid)
+
+                with col3:
                     if rc is None:
                         st.badge("running")
                     elif rc == 0:
                         st.badge("finished", color='green')
                     else:
                         st.badge(f"failed (code {rc})", color='red')
-
-                with col3:
-
-                    if st.button('', icon=":material/close:", type="secondary", key=key):
-                        terminate_process(key)
-                        st.rerun()
 
                 with col4:
                     st.write(f"**{key}**")
@@ -88,10 +87,10 @@ def process_dashboard():
                         stderr = proc.stderr.read() if proc.stderr else ""
 
                         if stdout:
-                            with st.expander("**stdout:**"):
+                            with st.expander("Output", icon=":material/output:"):
                                 st.code(stdout)
                         if stderr:
-                            with st.expander("**stderr:**"):
+                            with st.expander("Errors", icon=":material/breaking_news:"):
                                 st.code(stderr)
 
 def api_request(url):
@@ -385,6 +384,7 @@ def project_form(project):
         st.write(f"**Modified:** {formatted_time}")
 
     if project.get('is_new'):
+        # TODO: encapsulate into a separate function
         project['backend'] = st.selectbox("**Backend**", backends, index=backend_index)
 
         placeholder2 = st.empty()
@@ -438,8 +438,7 @@ def project_form(project):
             terminate_process('Annif')
             st.rerun()
 
-    #elif "dummy" == backend:
-    elif project.get("F1@5"): # already evaluated
+    elif project.get("F1@5"): # already evaluated // FIXME: this evaluates to false if F1@5 == 0 (unlikely but possible)
         pass
     elif evaluable:
         upload_action(project.get('project_id'), "Evaluate")

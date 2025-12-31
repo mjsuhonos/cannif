@@ -77,6 +77,12 @@ Cannif looks for evaluation information in the `data/eval` directory.  JSON file
 
 ![a screenshot](https://github.com/mjsuhonos/cannif/blob/main/images/metrics.png?raw=true)
 
+### task management
+
+Tasks running in the background are listed below the project information.  When tasks are completed, their status (finished or failed) is shown along with the relevant output.  Tasks can be cancelled by clicking on the 'X' next to their process ID.
+
+![a screenshot](https://github.com/mjsuhonos/cannif/blob/main/images/tasks.png?raw=true)
+
 ## that's all folks
 
 If you have any other ideas for how to improve cannif, get in touch or submit an issue!
