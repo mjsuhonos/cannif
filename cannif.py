@@ -15,10 +15,11 @@ from annif.registry import AnnifRegistry
 
 ANNIF_API = "http://127.0.0.1:5000/v1"
 ANNIF_CMD = ["annif"]
-ANNIF_RUN = ANNIF_CMD + ["run", "--host", "0.0.0.0"]
+ANNIF_RUN = ANNIF_CMD + ["run"]
 
 DATA_DIR = "data"
 
+########## Subprocess functions
 # Singleton to contain process handles
 @st.cache_resource
 def get_process_registry():
@@ -91,105 +92,7 @@ def process_exit_info(entry):
     # Terminated by signal or stopped → treat as failed (None or a sentinel)
     return -1
 
-def compact_count(n):
-    # Format integer counts like 1.2K / 3.4M / 5.6B
-    try:
-        import humanize
-        text = humanize.intword(n, format="%.1f")
-        return (
-            text.replace(" thousand", "K")
-                .replace(" million", "M")
-                .replace(" billion", "B")
-                .replace(" trillion", "T")
-        )
-    except Exception:
-        return str(n)
-
-def compact_bytes(n):
-    # Format bytes as a readable size.
-    try:
-        import humanize
-        return humanize.naturalsize(n, format="%.1f")
-    except Exception:
-        return str(n)
-
-def format_seconds(sec):
-    # Convert seconds to H:M:S style
-    try:
-        import humanize
-        return humanize.naturaldelta(sec)
-    except Exception:
-        return f"{sec:.1f}s"
-
-def render_usage(entry):
-    usage = entry.get("usage")
-    if not usage:
-        return
-
-    rss = usage.ru_maxrss
-    if sys.platform.startswith("linux"):
-        rss *= 1024  # KB → bytes on Linux
-
-    nice_rss = compact_bytes(rss)
-    nice_utime = format_seconds(usage.ru_utime)
-    nice_stime = format_seconds(usage.ru_stime)
-
-    col1, col2, col3 = st.columns(3)
-    col1.caption(f"User CPU: {nice_utime}")
-    col2.caption(f"System CPU: {nice_stime}")
-    col3.caption(f"Max RSS: {nice_rss}")
-
-def process_dashboard():
-    with process_registry["lock"]:
-        items = list(process_registry["processes"].items())
-
-    if not items:
-        return
-
-    with st.expander("**Tasks**", expanded=False, icon=":material/manage_history:"):
-        for key, entry in items:
-            # Refresh process status, usage, stdout/stderr
-            entry = get_process(key)
-            if not entry:
-                continue
-
-            proc = entry["process"]
-            exit_code = process_exit_info(entry)
-
-            with st.container():
-                col1, col2, col3, col4 = st.columns([1, 1.5, 2, 12])
-
-                with col1:
-                    if st.button('', icon=":material/close:", type="secondary", key=key):
-                        terminate_process(key)
-                        st.rerun()
-
-                with col2:
-                    st.write(proc.pid)
-
-                with col3:
-                    if exit_code is None:
-                        st.badge("running")
-                    elif exit_code == 0:
-                        st.badge("finished", color="green")
-                    else:
-                        text = "failed" if exit_code == -1 else f"failed (code {exit_code})"
-                        st.badge(text, color="red")
-
-                with col4:
-                    st.write(f"**{key}**")
-
-                    if exit_code is not None:
-                        render_usage(entry)
-
-                    # stdout/stderr content
-                    if stdout:= entry["stdout"]:
-                        with st.expander("Output", icon=":material/output:"):
-                            st.code(stdout)
-                    if stderr:= entry["stderr"]:
-                        with st.expander("Errors", icon=":material/breaking_news:"):
-                            st.code(stderr)
-
+########## API functions
 def api_request(url):
     def service_is_up():
         try:
@@ -288,277 +191,36 @@ def get_projects():
 
     return projects
 
-def list_projects(projects):
-    project_list = list(projects.values())
+########## Helper functions
+def compact_count(n):
+    # Format integer counts like 1.2K / 3.4M / 5.6B
+    try:
+        import humanize
+        text = humanize.intword(n, format="%.1f")
+        return (
+            text.replace(" thousand", "K")
+                .replace(" million", "M")
+                .replace(" billion", "B")
+                .replace(" trillion", "T")
+        )
+    except Exception:
+        return str(n)
 
-    if not project_list:
-        return
+def compact_bytes(n):
+    # Format bytes as a readable size.
+    try:
+        import humanize
+        return humanize.naturalsize(n, format="%.1f")
+    except Exception:
+        return str(n)
 
-    with st.container():
-        column_config = {
-            "name": "Project",
-            "vocab": "Vocab",
-            "backend": "Backend",
-            "language": "Language",
-            "modification_time": st.column_config.DatetimeColumn("Modified"),
-            "is_trained": "Trained",
-            "Recall_microavg": "Recall",
-            "false_positive_rate": "FPR",
-            "false_negative_rate": "FNR"
-        }
-        column_order = ["name", "vocab", "backend", "language",
-                        "modification_time", "is_trained", "F1@5",
-                        "Precision@1", "Precision@3", "Precision@5",
-                        "Recall_microavg", "false_positive_rate", "false_negative_rate", 
-                        "NDCG", "NDCG@5", "NDCG@10"]
-
-        # strip columns not required for dataframe display
-        filtered_projects = [
-            {k: d.get(k) for k in column_order}
-            for d in project_list
-        ]
-
-        df = pd.DataFrame(filtered_projects)
-
-        df["is_trained"] = df["is_trained"].apply(lambda x: "✔" if x else "-")
-
-        st.dataframe(df, hide_index=True, column_config=column_config,
-                    column_order=column_order, key="table",
-                    selection_mode="single-row", on_select="rerun")
-
-        # if there are metrics, show graphs
-        # TODO: encapsulate this and move to main() below project details
-        if df["F1@5"].notna().any():
-            df = df.set_index("name").dropna(subset=["F1@5"])
-            df = df.rename(columns={
-                            "Recall_microavg": "Recall",
-                            "false_positive_rate": "FPR",
-                            "false_negative_rate": "FNR"})
-            
-            with st.expander("**Metrics**", expanded=False, icon=":material/bar_chart:"):
-
-                col1, col2, col3 = st.columns(3)
-                with col1:
-                    st.bar_chart(df, sort="-F1@5", stack=False, x_label='',
-                                y=["Precision@1","Precision@3","Precision@5"])
-                with col2:
-                    st.bar_chart(df, sort="-F1@5", stack=False, x_label='',
-                                y=["Recall", "FPR", "FNR"])
-                with col3:
-                    st.bar_chart(df, sort="-F1@5", stack=False, x_label='',
-                                y=["NDCG", "NDCG@5", "NDCG@10"])
-
-def project_details(projects):
-    # Get the selected row index (Streamlit stores it in session state)
-    table_state = st.session_state.get("table", {})
-    selected_rows = table_state.get("selection", {}).get("rows", [])
-
-    if selected_rows:
-        row_index = selected_rows[0]
-        project_list = list(projects.values())
-
-        # FIXME: don't like relying on row index
-        project = project_list[row_index]
-
-        with st.expander(f"**{project.get('name')}**", expanded=True, icon=":material/assignment:"):
-            col1, col2 = st.columns(2)
-            with col1:
-                project_form(project)
-                eval_results(project)
-
-            with col2:
-                backend_form(project, projects.keys())
-
-def vocab_form(project):
-    vocabs = get_vocabs()
-    
-    if vocabs:
-        vocab_ids = [item["vocab_id"] for item in vocabs if "vocab_id" in item]
-    else:
-        vocab_ids = []
-        
-    with st.container(border=True):
-        lang_code = project.get("language")
-        try:
-            import iso639
-            lang = iso639.Language.from_part1(lang_code).name
-        except Exception:
-            lang = lang_code
-
-        if vocab_spec := project.get("vocab_spec"):     # Present for loaded projects
-            vocab_id = re.match(r"([^(]+)", vocab_spec).group(1)
-
-            index = vocab_ids.index(vocab_id)
-            vocab = vocabs[index]
-
-            is_loaded = vocab.get("loaded", False)
-            disabled = True
-        else:
-            vocab_id, vocab, is_loaded, index = "", {}, False, None
-            disabled = False
-
-        selected_id = st.selectbox("**Vocab ID**", vocab_ids, index=index, disabled=disabled, accept_new_options=True)
-    
-        if selected_id:
-            vocab_id = selected_id
-            if vocab_id in vocab_ids:
-                index = vocab_ids.index(vocab_id)
-                vocab = vocabs[index]
-                is_loaded = True
-                lang = vocab.get("languages", [lang])[0]
-
-        if not is_loaded:
-            st.badge("Use only letters, numbers, and underscores", icon=":material/check:")
-
-        codes = vocab.get('languages') or ["en", "fi", "fr", "sv"]
-        try:
-            index = codes.index(lang)
-        except:
-            index = None
-
-        lang_id = st.selectbox("**Language**", codes, index=index, disabled=disabled, accept_new_options=True)
-
-        if is_loaded:
-            size = compact_count(vocab.get('size'))
-            st.write(f"**Terms:** {size}")
-            
-            project['vocab'] = vocab_id
-            project['language'] = lang_id
-
-        else:
-            st.badge("Use only 2-letter ISO 639-1 language codes", icon=":material/check:")
-
-            if not vocab_id:
-                st.error('Please select a vocab')
-            elif not lang_id:
-                st.error('Please select a language')
-            else:
-                if upload_action(f"{vocab_id}_{lang_id}", "Load Vocab"):
-                    is_loaded = True
-                    st.session_state.new_vocab = [vocab_id, lang_id]
-
-def project_form(project):
-    backend = project.get('backend')
-    backends = ["dummy", "ensemble", "fasttext", "http", "mllm", "nn_ensemble",
-                "omikuji", "pav", "stwfsa", "svc", "tfidf", "yake"]
-    backend_index = backends.index(backend) if backend else 0
-
-    is_trained = True if project.get('is_trained') else False
-    trainable = False if "dummy" == backend or "ensemble" == backend or "yake" == backend else True
-    evaluable = True if is_trained or not trainable else False
-
-    if None == is_trained: # can't load backend
-        st.subheader("Not Available", divider="red")
-        return
-    elif project.get('is_new'):
-        project['name'] = st.text_input("**Name**")
-    elif not trainable:
-        st.subheader("Training Not Required", divider="green")
-    elif is_trained:
-        st.subheader("Trained", divider="green")
-    else:
-        st.subheader("Not Trained", divider="red")
-    
-    vocab_form(project)
-
-    analyzer_spec = st.selectbox("**Analyzer**", ['simple', 'snowball', 'simplemma'], disabled=is_trained)
-
-    project['transform_spec'] = st.text_input("**Transform**",
-        value=project.get('transform_spec'), disabled=is_trained
-    )
-
-    if modtime := project.get('modification_time'):
-        try:
-            from datetime import datetime
-            dt = datetime.fromisoformat(modtime)
-            formatted_time = dt.strftime("%Y-%m-%d %H:%M:%S")
-        except:
-            formatted_time = modtime
-        st.write(f"**Modified:** {formatted_time}")
-
-    if project.get('is_new'):
-        # TODO: encapsulate into a separate function
-        project['backend'] = st.selectbox("**Backend**", backends, index=backend_index)
-
-        placeholder2 = st.empty()
-        if placeholder2.button('Create Project', type="primary"):
-            # Check form values
-            if not project.get('name'):
-                st.error('Please provide a project name')
-                return
-
-            if new_vocab := st.session_state.get('new_vocab'):
-                project['language'] = new_vocab[1]
-                project['vocab'] = new_vocab[0]
-                del st.session_state.new_vocab
-
-            if not project.get('vocab'):
-                st.error('Please select a loaded vocab')
-                return
-            elif not project.get('language'):
-                st.error('Please select a language')
-                return
-            
-            # add language to analyzer if necessary
-            if 'snowball' == analyzer_spec:
-                snowball_languages = {'ar': 'arabic', 'da': 'danish', 'nl': 'dutch', 
-                                      'en': 'english', 'fi': 'finnish', 'fr': 'french', 
-                                      'de': 'german', 'hu': 'hungarian', 'it': 'italian', 
-                                      'no': 'norwegian', 'po': 'portuguese', 
-                                      'ro': 'romanian', 'ru': 'russian', 'sp': 'spanish', 
-                                      'sw': 'swedish'}                
-
-                if lang := snowball_languages.get(project.get('language')):
-                    project['analyzer_spec'] = f"snowball({lang})"
-                else:
-                    st.error('Language not supported by analyzer')
-                    return
-
-            elif 'simplemma' == analyzer_spec:
-                project['analyzer_spec'] = f"simplemma({project.get('language')})"
-            else:
-                project['analyzer_spec'] = analyzer_spec
-
-            placeholder2.write(' ') # Clear the button
-
-            # TODO: use something more robust to mint IDs
-            project['project_id'] = f"{project.get('vocab')}_{project.get('language')}_{project.get('backend')}".lower().replace(" ", "_")
-
-            save_project(project)
-            st.success("Project created successfully!")
-
-            # Stop Annif and restart
-            terminate_process('Annif')
-            st.rerun()
-
-    elif project.get("F1@5"): # already evaluated // FIXME: this evaluates to false if F1@5 == 0 (unlikely but possible)
-        pass
-    elif evaluable:
-        upload_action(project.get('project_id'), "Evaluate")
-    elif trainable:
-        upload_action(project.get('project_id'), "Train")
-        st.warning("Training is very resource-intensive!", icon=":material/warning:")
-
-def eval_results(project):
-    if project.get("F1@5"):
-        st.subheader("Evaluation", divider="grey")
-        
-        numdocs = compact_count(project.get('Documents_evaluated'))
-        st.write(f"**Documents Evaluated:** {numdocs}")
-
-        data = {"Cutoff": ["@1", "@3", "@5"],
-                "Precision": [project["Precision@1"], project["Precision@3"], project["Precision@5"]]}
-        show_bar_chart(data)
-
-        data = {"Metric": ["Recall", "FPR", "FNR"],
-                "Percent": [project["Recall_microavg"] * 100,
-                            project["false_positive_rate"] * 100,
-                            project["false_negative_rate"] * 100]}
-        show_bar_chart(data)
-
-        data = {"Cutoff": ["@1", "@5", "@10"],
-                "NDCG": [project["NDCG"], project["NDCG@5"], project["NDCG@10"]]}
-        show_bar_chart(data)
+def format_seconds(sec):
+    # Convert seconds to H:M:S style
+    try:
+        import humanize
+        return humanize.naturaldelta(sec)
+    except Exception:
+        return f"{sec:.1f}s"
 
 def show_bar_chart(data):
     it = iter(data)
@@ -572,8 +234,7 @@ def show_bar_chart(data):
 def upload_action(project_id, action):
     task_id = f"{action} {project_id}"
 
-    # Show status
-    # TODO: if evaluate failed, show that
+    # TODO: if process failed, show that
     if get_process(task_id):
         st.info(f"{action} is running", icon=":material/hourglass:")
         return
@@ -587,9 +248,9 @@ def upload_action(project_id, action):
                 tmp.write(uploaded_file.read())
                 tmp_path = tmp.name
 
-    placeholder = st.empty()
+    uploader = st.empty()
 
-    if placeholder.button(action, type="primary"):
+    if uploader.button(action, type="primary"):
         if not uploaded_file:
             st.error("No file uploaded")
             return
@@ -640,12 +301,12 @@ def upload_action(project_id, action):
         else:
             st.warning(f"{action} is not implemented yet", icon=":material/warning:")
 
-        placeholder.write(' ') # Clear the button
+        uploader.write(' ') # Clear the button
         return uploaded_file
 
     # remove the button if a vocab is loaded in session
     if st.session_state.get('new_vocab'):
-        placeholder.write(' ')
+        uploader.write(' ')
 
 def save_project(project):
     # TODO: check required values
@@ -672,6 +333,361 @@ def save_project(project):
             file.write(f"analyzer = {analyzer}\n")
         if transform:
             file.write(f"transform = {transform}\n")
+
+########## UI rendering functions
+def process_usage(entry):
+    usage = entry.get("usage")
+    if not usage:
+        return
+
+    rss = usage.ru_maxrss
+    if sys.platform.startswith("linux"):
+        rss *= 1024  # KB → bytes on Linux
+
+    nice_rss = compact_bytes(rss)
+    nice_utime = format_seconds(usage.ru_utime)
+    nice_stime = format_seconds(usage.ru_stime)
+
+    col1, col2, col3 = st.columns(3)
+    col1.caption(f"User CPU: {nice_utime}")
+    col2.caption(f"System CPU: {nice_stime}")
+    col3.caption(f"Max RSS: {nice_rss}")
+
+def process_dashboard():
+    with process_registry["lock"]:
+        items = list(process_registry["processes"].items())
+
+    if not items:
+        return
+
+    with st.expander("**Tasks**", expanded=False, icon=":material/manage_history:"):
+        for key, entry in items:
+            # Refresh process status, usage, stdout/stderr
+            entry = get_process(key)
+            if not entry:
+                continue
+
+            proc = entry["process"]
+            exit_code = process_exit_info(entry)
+
+            with st.container():
+                col1, col2, col3, col4 = st.columns([1, 1.5, 2, 12])
+
+                with col1:
+                    if st.button('', icon=":material/close:", type="secondary", key=key):
+                        terminate_process(key)
+                        st.rerun()
+
+                with col2:
+                    st.write(proc.pid)
+
+                with col3:
+                    if exit_code is None:
+                        st.badge("running")
+                    elif exit_code == 0:
+                        st.badge("finished", color="green")
+                    else:
+                        text = "failed" if exit_code == -1 else f"failed (code {exit_code})"
+                        st.badge(text, color="red")
+
+                with col4:
+                    st.write(f"**{key}**")
+
+                    if exit_code is not None:
+                        process_usage(entry)
+
+                    # stdout/stderr content
+                    if stdout:= entry["stdout"]:
+                        with st.expander("Output", icon=":material/output:"):
+                            st.code(stdout)
+                    if stderr:= entry["stderr"]:
+                        with st.expander("Errors", icon=":material/breaking_news:"):
+                            st.code(stderr)
+
+def new_project():
+    @st.dialog("New Project")
+    def project_modal():
+        project_form({'is_new': True})
+
+    if st.session_state.get("project_modal", False):
+        st.session_state.project_modal = False
+        project_modal()
+
+    with st.container(horizontal=True):
+        if st.button("New Project", icon=":material/add_box:"):
+            st.session_state.project_modal = True
+            st.rerun()
+
+def list_projects(projects):
+    project_list = list(projects.values())
+
+    if not project_list:
+        return
+
+    column_config = {
+        "name": "Project",
+        "vocab": "Vocab",
+        "backend": "Backend",
+        "language": "Language",
+        "modification_time": st.column_config.DatetimeColumn("Modified"),
+        "is_trained": "Trained",
+        "Recall_microavg": "Recall",
+        "false_positive_rate": "FPR",
+        "false_negative_rate": "FNR"
+    }
+    column_order = ["name", "vocab", "backend", "language",
+                    "modification_time", "is_trained", "F1@5",
+                    "Precision@1", "Precision@3", "Precision@5",
+                    "Recall_microavg", "false_positive_rate", "false_negative_rate", 
+                    "NDCG", "NDCG@5", "NDCG@10"]
+
+    # strip columns not required for dataframe display
+    filtered_projects = [
+        {k: d.get(k) for k in column_order}
+        for d in project_list
+    ]
+
+    df = pd.DataFrame(filtered_projects)
+
+    df["is_trained"] = df["is_trained"].apply(lambda x: "✔" if x else "-")
+
+    st.dataframe(df, hide_index=True, column_config=column_config,
+                column_order=column_order, key="table",
+                selection_mode="single-row", on_select="rerun")
+
+    # pass the formatted dataframe back for metrics
+    return df
+
+def project_metrics(df):
+    # if there are metrics, show graphs
+    if not df["F1@5"].notna().any():
+        return
+    
+    df = df.set_index("name").dropna(subset=["F1@5"])
+    df = df.rename(columns={
+                    "Recall_microavg": "Recall",
+                    "false_positive_rate": "FPR",
+                    "false_negative_rate": "FNR"})
+    
+    with st.expander("**Metrics**", expanded=False, icon=":material/bar_chart:"):
+
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            st.bar_chart(df, sort="-F1@5", stack=False, x_label='',
+                        y=["Precision@1","Precision@3","Precision@5"])
+        with col2:
+            st.bar_chart(df, sort="-F1@5", stack=False, x_label='',
+                        y=["Recall", "FPR", "FNR"])
+        with col3:
+            st.bar_chart(df, sort="-F1@5", stack=False, x_label='',
+                        y=["NDCG", "NDCG@5", "NDCG@10"])
+
+def project_details(projects):
+    # Get the selected row index (Streamlit stores it in session state)
+    table_state = st.session_state.get("table", {})
+    selected_rows = table_state.get("selection", {}).get("rows", [])
+
+    if not selected_rows:
+        return
+
+    row_index = selected_rows[0]
+    project_list = list(projects.values())
+
+    # FIXME: don't like relying on row index
+    project = project_list[row_index]
+
+    with st.expander(f"**{project.get('name')}**", expanded=True, icon=":material/assignment:"):
+        col1, col2 = st.columns(2)
+        with col1:
+            project_form(project)
+            eval_results(project)
+
+        with col2:
+            backend_form(project, projects.keys())
+
+    st.caption(f"{len(projects)} projects")
+
+def project_form(project):
+    backend = project.get('backend')
+    backends = ["dummy", "ensemble", "fasttext", "http", "mllm", "nn_ensemble",
+                "omikuji", "pav", "stwfsa", "svc", "tfidf", "yake"]
+    backend_index = backends.index(backend) if backend else 0
+
+    is_trained = True if project.get('is_trained') else False
+    trainable = False if "dummy" == backend or "ensemble" == backend or "yake" == backend else True
+    evaluable = True if is_trained or not trainable else False
+
+    if None == is_trained: # can't load backend
+        st.subheader("Not Available", divider="red")
+        return
+    elif project.get('is_new'):
+        project['name'] = st.text_input("**Name**")
+    elif not trainable:
+        st.subheader("Training Not Required", divider="green")
+    elif is_trained:
+        st.subheader("Trained", divider="green")
+    else:
+        st.subheader("Not Trained", divider="red")
+    
+    vocab_form(project)
+
+    analyzer_spec = st.selectbox("**Analyzer**", ['simple', 'snowball', 'simplemma'], disabled=is_trained)
+
+    project['transform_spec'] = st.text_input("**Transform**",
+        value=project.get('transform_spec'), disabled=is_trained
+    )
+
+    if modtime := project.get('modification_time'):
+        try:
+            from datetime import datetime
+            dt = datetime.fromisoformat(modtime)
+            formatted_time = dt.strftime("%Y-%m-%d %H:%M:%S")
+        except:
+            formatted_time = modtime
+        st.write(f"**Modified:** {formatted_time}")
+
+    if project.get('is_new'):
+        # TODO: encapsulate into a separate function
+        project['backend'] = st.selectbox("**Backend**", backends, index=backend_index)
+
+        new_project = st.empty()
+
+        if new_project.button('Create Project', type="primary"):
+
+            # Check form values
+            if not project.get('name'):
+                st.error('Please provide a project name')
+                return
+
+            if new_vocab := st.session_state.get('new_vocab'):
+                project['language'] = new_vocab[1]
+                project['vocab'] = new_vocab[0]
+                del st.session_state.new_vocab
+
+            if not project.get('vocab'):
+                st.error('Please select a loaded vocab')
+                return
+            elif not project.get('language'):
+                st.error('Please select a language')
+                return
+            
+            # add language to analyzer if necessary
+            if 'snowball' == analyzer_spec:
+                snowball_languages = {'ar': 'arabic', 'da': 'danish', 'nl': 'dutch', 
+                                      'en': 'english', 'fi': 'finnish', 'fr': 'french', 
+                                      'de': 'german', 'hu': 'hungarian', 'it': 'italian', 
+                                      'no': 'norwegian', 'po': 'portuguese', 
+                                      'ro': 'romanian', 'ru': 'russian', 'sp': 'spanish', 
+                                      'sw': 'swedish'}                
+
+                if lang := snowball_languages.get(project.get('language')):
+                    project['analyzer_spec'] = f"snowball({lang})"
+                else:
+                    st.error('Language not supported by analyzer')
+                    return
+
+            elif 'simplemma' == analyzer_spec:
+                project['analyzer_spec'] = f"simplemma({project.get('language')})"
+            else:
+                project['analyzer_spec'] = analyzer_spec
+
+            new_project.write(' ') # Clear the button
+
+            # TODO: use something more robust to mint IDs
+            project['project_id'] = f"{project.get('vocab')}_{project.get('language')}_{project.get('backend')}".lower().replace(" ", "_")
+
+            save_project(project)
+            st.success("Project created successfully!")
+
+            # Stop Annif and restart
+            terminate_process('Annif')
+            st.rerun()
+
+    elif project.get("F1@5"): # already evaluated // FIXME: this evaluates to false if F1@5 == 0 (unlikely but possible)
+        pass
+    elif evaluable:
+        upload_action(project.get('project_id'), "Evaluate")
+    elif trainable:
+        upload_action(project.get('project_id'), "Train")
+        st.warning("Training is very resource-intensive!", icon=":material/warning:")
+
+def vocab_form(project):
+    vocabs = get_vocabs()
+    
+    if vocabs:
+        vocab_ids = [item["vocab_id"] for item in vocabs if item.get("loaded") is True and "vocab_id" in item]
+    else:
+        vocab_ids = []
+        
+    with st.container(border=True):
+        lang_code = project.get("language")
+        try:
+            import iso639
+            lang = iso639.Language.from_part1(lang_code).name
+        except Exception:
+            lang = lang_code
+
+        # Defaults
+        vocab_id = ""
+        vocab = {}
+        is_loaded = False
+        index = None
+        disabled = False
+
+        # If project was loaded with an existing vocab
+        vocab_spec = project.get("vocab_spec")
+        if vocab_spec:
+            match = re.match(r"([^(]+)", vocab_spec)
+            if match:
+                vocab_id = match.group(1)
+
+                if vocab_id in vocab_ids:
+                    index = vocab_ids.index(vocab_id)
+                    vocab = vocabs[index]
+                    is_loaded = vocab.get("loaded", False)
+                    disabled = True
+
+        selected_id = st.selectbox("**Vocab ID**", vocab_ids, index=index, disabled=disabled, accept_new_options=True)
+    
+        # Update state from selection
+        if selected_id and selected_id in vocab_ids:
+            vocab_id = selected_id
+            index = vocab_ids.index(vocab_id)
+            vocab = vocabs[index]
+            is_loaded = True
+
+            # Prefer vocab language if present
+            lang = vocab.get("languages", [lang])[0]
+
+        if not is_loaded:
+            st.badge("Use only letters, numbers, and underscores", icon=":material/check:")
+
+        codes = vocab.get('languages') or ["en", "fi", "fr", "sv"]
+        try:
+            index = codes.index(lang)
+        except:
+            index = None
+
+        lang_id = st.selectbox("**Language**", codes, index=index, disabled=disabled, accept_new_options=True)
+
+        if is_loaded:
+            size = compact_count(vocab.get('size'))
+            st.write(f"**Terms:** {size}")
+            
+            project['vocab'] = vocab_id
+            project['language'] = lang_id
+
+        else:
+            st.badge("Use only 2-letter ISO 639-1 language codes", icon=":material/check:")
+
+            if not vocab_id:
+                st.error('Please select a vocab')
+            elif not lang_id:
+                st.error('Please select a language')
+            else:
+                if upload_action(f"{vocab_id}_{lang_id}", "Load Vocab"):
+                    is_loaded = True
+                    st.session_state.new_vocab = [vocab_id, lang_id]
 
 def backend_form(project, keys):
     backend = project.get('backend')
@@ -745,20 +761,30 @@ def backend_form(project, keys):
             st.json(response)
             #save_project(response)
 
-def new_project():
-    @st.dialog("New Project")
-    def project_modal():
-        project_form({'is_new': True})
+def eval_results(project):
+    if not project.get("F1@5"):
+        return
 
-    if st.session_state.get("project_modal", False):
-        st.session_state.project_modal = False
-        project_modal()
+    st.subheader("Evaluation", divider="grey")
+    
+    numdocs = compact_count(project.get('Documents_evaluated'))
+    st.write(f"**Documents Evaluated:** {numdocs}")
 
-    with st.container(horizontal=True):
-        if st.button("New Project", icon=":material/add_box:"):
-            st.session_state.project_modal = True
-            st.rerun()
+    data = {"Cutoff": ["@1", "@3", "@5"],
+            "Precision": [project["Precision@1"], project["Precision@3"], project["Precision@5"]]}
+    show_bar_chart(data)
 
+    data = {"Metric": ["Recall", "FPR", "FNR"],
+            "Percent": [project["Recall_microavg"] * 100,
+                        project["false_positive_rate"] * 100,
+                        project["false_negative_rate"] * 100]}
+    show_bar_chart(data)
+
+    data = {"Cutoff": ["@1", "@5", "@10"],
+            "NDCG": [project["NDCG"], project["NDCG@5"], project["NDCG@10"]]}
+    show_bar_chart(data)
+
+##########
 def main():
     st.set_page_config(page_title="cannif", layout="wide")
 
@@ -775,13 +801,13 @@ def main():
 
     projects = get_projects()
 
-    list_projects(projects)
+    df = list_projects(projects)
 
     project_details(projects)
     
+    project_metrics(df)
+    
     process_dashboard()
-
-    st.caption(f"{len(projects)} projects")
 
 if __name__ == "__main__":
     main()
