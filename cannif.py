@@ -809,5 +809,7 @@ def main():
     
     process_dashboard()
 
+    st.caption("Made with love in Canada :canada:")
+
 if __name__ == "__main__":
     main()
