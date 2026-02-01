@@ -129,6 +129,9 @@ def get_projects():
     response = api_request(f"{ANNIF_API}/projects")
     api_projects = response.get("projects") # array
 
+    if None == api_projects:
+        return {}
+
     projects = {p.get("project_id"): p for p in api_projects}
 
     # Use Annif module to get values not available from API
@@ -459,6 +462,9 @@ def list_projects(projects):
     return df
 
 def project_metrics(df):
+    if df.empty:
+        return
+    
     # if there are metrics, show graphs
     if not df["F1@5"].notna().any():
         return
@@ -804,9 +810,9 @@ def main():
     df = list_projects(projects)
 
     project_details(projects)
-    
+
     project_metrics(df)
-    
+
     process_dashboard()
 
     st.caption("Made with love in Canada :canada:")
