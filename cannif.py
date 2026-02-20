@@ -131,7 +131,7 @@ def get_projects():
     response = api_request(f"{ANNIF_API}/projects")
     api_projects = response.get("projects") # array
 
-    if None == api_projects:
+    if api_projects is None:
         return {}
 
     projects = {p.get("project_id"): p for p in api_projects}
@@ -262,9 +262,9 @@ def upload_action(project_id, action):
             st.error("No file uploaded")
             return
 
-        source_path = os.path.join(os.getcwd(), tmp_path)
+        source_path = tmp_path
 
-        if "Load Vocab" == action:
+        if action == "Load Vocab":
             vocab_id, lang = project_id.split('_', 1)
 
             if '' == vocab_id:
@@ -296,13 +296,12 @@ def upload_action(project_id, action):
                     st.error("Error loading vocab:")
                     st.code(e.stderr)
 
-        elif "Train" == action:
-            start_process(task_id, ANNIF_CMD + ["train", project_id, source_path])
-            st.info(f"{action} is running", icon=":material/hourglass:")
-
-        elif "Evaluate" == action:
-            dest_path = os.path.join(os.getcwd(), DATA_DIR, 'eval', project_id + ".json")
-            start_process(task_id, ANNIF_CMD + ["eval", project_id, source_path, "-M", dest_path])
+        elif action in ("Train", "Evaluate"):
+            if action == "Evaluate":
+                dest_path = os.path.join(os.getcwd(), DATA_DIR, 'eval', project_id + ".json")
+                start_process(task_id, ANNIF_CMD + ["eval", project_id, source_path, "-M", dest_path])
+            else:
+                start_process(task_id, ANNIF_CMD + ["train", project_id, source_path])
             st.info(f"{action} is running", icon=":material/hourglass:")
 
         else:
@@ -466,7 +465,7 @@ def list_projects(projects):
     return df
 
 def project_metrics(df):
-    if df.empty:
+    if df is None or df.empty:
         return
     
     # if there are metrics, show graphs
@@ -524,8 +523,8 @@ def project_form(project):
     backend_index = backends.index(backend) if backend else 0
 
     is_trained = project.get('is_trained')
-    trainable = False if "dummy" == backend or "ensemble" == backend or "yake" == backend else True
-    evaluable = True if is_trained or not trainable else False
+    trainable = backend not in ("dummy", "ensemble", "yake")
+    evaluable = bool(is_trained) or not trainable
 
     if is_trained is None: # can't load backend
         st.subheader("Not Available", divider="red")
@@ -625,7 +624,7 @@ def vocab_form(project):
     vocabs = get_vocabs()
     
     if vocabs:
-        vocab_ids = [item["vocab_id"] for item in vocabs if item.get("loaded") is True and "vocab_id" in item]
+        vocab_ids = [item["vocab_id"] for item in vocabs if item.get("loaded") and item.get("vocab_id")]
     else:
         vocab_ids = []
         
@@ -738,7 +737,7 @@ def backend_form(project, keys):
             else:
                 form_value = st.text_input(key, value=filtered_backend.get(key), placeholder=default_params.get(key))
 
-            if None != form_value:
+            if form_value is not None:
                 filtered_backend[key] = form_value
 
         response = {
