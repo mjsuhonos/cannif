@@ -27,6 +27,19 @@ def get_process_registry():
 
 process_registry = get_process_registry()
 
+def _drain_stream(stream, buf):
+    """Background thread target: read lines from a pipe into buf until EOF.
+
+    Keeping the pipe drained prevents the child process from blocking on a
+    full kernel pipe buffer (typically ~64 KB on Linux), which would cause
+    long-running jobs to stall mid-execution.
+    """
+    try:
+        for line in stream:
+            buf.append(line)
+    except Exception:
+        pass
+
 def start_process(key, command):
     with process_registry["lock"]:
         if key not in process_registry["processes"]:
@@ -37,8 +50,24 @@ def start_process(key, command):
                 text=True,
                 bufsize=1
             )
+            stdout_lines: list[str] = []
+            stderr_lines: list[str] = []
+            t_out = threading.Thread(
+                target=_drain_stream, args=(p.stdout, stdout_lines),
+                daemon=True, name=f"{key}-stdout"
+            )
+            t_err = threading.Thread(
+                target=_drain_stream, args=(p.stderr, stderr_lines),
+                daemon=True, name=f"{key}-stderr"
+            )
+            t_out.start()
+            t_err.start()
             process_registry["processes"][key] = {
                 "process": p,
+                "_stdout_lines": stdout_lines,
+                "_stderr_lines": stderr_lines,
+                "_t_out": t_out,
+                "_t_err": t_err,
                 "stdout": None,
                 "stderr": None,
                 "usage": None,
@@ -53,33 +82,45 @@ def get_process(key):
 
         p = entry["process"]
 
-        try:
-            pid, status, rusage = os.wait4(p.pid, os.WNOHANG)
-            if pid != 0: # process finished
-                entry["usage"] = rusage
-                entry["status"] = status
+        # Only attempt to reap the process once (status is None while running).
+        if entry["status"] is None:
+            try:
+                pid, status, rusage = os.wait4(p.pid, os.WNOHANG)
+                if pid != 0: # process finished
+                    entry["usage"] = rusage
+                    entry["status"] = status
+            except ChildProcessError:
+                pass
 
-                # capture stdout/stderr
-                if entry["stdout"] is None and p.stdout:
-                    entry["stdout"] = p.stdout.read()
-                    p.stdout.close()
-                if entry["stderr"] is None and p.stderr:
-                    entry["stderr"] = p.stderr.read()
-                    p.stderr.close()
-
-        except ChildProcessError:
-            pass
+        # Collect buffered output once the process has exited and the reader
+        # threads have finished (is_alive() avoids a blocking join()).
+        if entry["status"] is not None:
+            if entry["stdout"] is None and not entry["_t_out"].is_alive():
+                entry["stdout"] = "".join(entry["_stdout_lines"])
+            if entry["stderr"] is None and not entry["_t_err"].is_alive():
+                entry["stderr"] = "".join(entry["_stderr_lines"])
 
         return entry
 
 def terminate_process(key):
-    entry = get_process(key)
-    if entry:
-        p = entry["process"]
+    # Atomically remove the entry so no other caller can race against us.
+    with process_registry["lock"]:
+        entry = process_registry["processes"].pop(key, None)
+    if not entry:
+        return
+
+    p = entry["process"]
+    try:
         p.terminate()
+    except (ProcessLookupError, OSError):
+        pass  # Process already exited before we could signal it.
+    try:
+        p.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        p.kill()
         p.wait()
-        with process_registry["lock"]:
-            del process_registry["processes"][key]
+    except ChildProcessError:
+        pass  # Zombie was already reaped by os.wait4 inside get_process.
 
 def process_exit_info(entry):
     status_val = entry.get("status")
@@ -237,8 +278,9 @@ def show_bar_chart(data):
 def upload_action(project_id, action):
     task_id = f"{action} {project_id}"
 
-    # TODO: if process failed, show that
-    if get_process(task_id):
+    entry = get_process(task_id)
+    if entry and entry.get("status") is None:
+        # Process is still running — don't allow a second submission.
         st.info(f"{action} is running", icon=":material/hourglass:")
         return
 
