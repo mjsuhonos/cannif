@@ -847,7 +847,7 @@ def main():
 
     st.markdown('<style>span[class^="st-"] { max-width: 100%; }</style>', unsafe_allow_html=True)
     st.markdown("<style>#cannif { font-family: Jost, sans-serif; }</style>", unsafe_allow_html=True)
-    st.markdown("# <span style='color:red;'>can</span><span style='color:#002D72;'>nif</span>", unsafe_allow_html=True)
+    st.markdown("# <span style='color:#D80621;'>can</span><span style='color:#003580;'>nif</span>", unsafe_allow_html=True)
 
     if version := get_annif_version():
         st.caption(f"Annif {version} at {ANNIF_API}")
@@ -865,8 +865,6 @@ def main():
     project_metrics(df)
 
     process_dashboard()
-
-    st.caption("Made with love in Canada :canada:")
 
 if __name__ == "__main__":
     main()
