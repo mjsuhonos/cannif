@@ -338,12 +338,13 @@ def upload_action(project_id, action):
                     st.error("Error loading vocab:")
                     st.code(e.stderr)
 
-        elif action in ("Train", "Evaluate"):
-            if action == "Evaluate":
-                dest_path = os.path.join(os.getcwd(), DATA_DIR, 'eval', project_id + ".json")
-                start_process(task_id, ANNIF_CMD + ["eval", project_id, source_path, "-M", dest_path])
-            else:
-                start_process(task_id, ANNIF_CMD + ["train", project_id, source_path])
+        elif "Train" == action:
+            start_process(task_id, ANNIF_CMD + ["train", project_id, source_path])
+            st.info(f"{action} is running", icon=":material/hourglass:")
+
+        elif "Evaluate" == action:
+            dest_path = os.path.join(os.getcwd(), DATA_DIR, 'eval', project_id + ".json")
+            start_process(task_id, ANNIF_CMD + ["eval", project_id, source_path, "-M", dest_path])
             st.info(f"{action} is running", icon=":material/hourglass:")
 
         else:
@@ -564,14 +565,16 @@ def project_form(project):
                 "omikuji", "pav", "stwfsa", "svc", "tfidf", "yake"]
     backend_index = backends.index(backend) if backend else 0
 
-    is_trained = project.get('is_trained')
+    is_trained = True if project.get('is_trained') else False
     trainable = backend not in ("dummy", "ensemble", "yake")
     evaluable = bool(is_trained) or not trainable
-
-    if is_trained is None: # can't load backend
-        st.subheader("Not Available", divider="red")
-        return
-    elif project.get('is_new'):
+    
+    # TODO: handle this condition better
+    #if is_trained is None: # can't load backend
+    #    st.subheader("Not Available", divider="red")
+    #    return
+    #el
+    if project.get('is_new'):
         project['name'] = st.text_input("**Name**")
     elif not trainable:
         st.subheader("Training Not Required", divider="green")
