@@ -116,6 +116,8 @@ def api_request(url):
             st.rerun()
         time.sleep(3)
 
+    return {}
+
 def get_annif_version():
     response = api_request(f"{ANNIF_API}/")
     return response.get("version")
@@ -135,6 +137,7 @@ def get_projects():
     projects = {p.get("project_id"): p for p in api_projects}
 
     # Use Annif module to get values not available from API
+    local_projects = {}
     try:
         registry = AnnifRegistry(
             projects_config_path=find_config(),
@@ -174,19 +177,20 @@ def get_projects():
         filepath = os.path.join(os.getcwd(), DATA_DIR, 'eval', project_id + ".json")
 
         try:
-            metrics = json.load(open(filepath, 'r'))
+            with open(filepath, 'r') as f:
+                metrics = json.load(f)
 
-            # Calculate some useful rates 
+            # Calculate some useful rates
             tp = metrics["True_positives"]
             fp = metrics["False_positives"]
             fn = metrics["False_negatives"]
-    
+
             false_positive_rate = fp / (fp + tp) if (fp + tp) > 0 else 0
             false_negative_rate = fn / (fn + tp) if (fn + tp) > 0 else 0
-        
+
             metrics["false_positive_rate"] = false_positive_rate
             metrics["false_negative_rate"] = false_negative_rate
-            
+
         except (FileNotFoundError, json.JSONDecodeError):
             metrics = {}
 
@@ -267,7 +271,7 @@ def upload_action(project_id, action):
                 st.error('Please provide a vocab ID')
                 return
 
-            if 'None' == lang:
+            if not lang:
                 st.error('Please provide a language code')
                 return
 
@@ -519,11 +523,11 @@ def project_form(project):
                 "omikuji", "pav", "stwfsa", "svc", "tfidf", "yake"]
     backend_index = backends.index(backend) if backend else 0
 
-    is_trained = True if project.get('is_trained') else False
+    is_trained = project.get('is_trained')
     trainable = False if "dummy" == backend or "ensemble" == backend or "yake" == backend else True
     evaluable = True if is_trained or not trainable else False
 
-    if None == is_trained: # can't load backend
+    if is_trained is None: # can't load backend
         st.subheader("Not Available", divider="red")
         return
     elif project.get('is_new'):
@@ -582,8 +586,8 @@ def project_form(project):
                 snowball_languages = {'ar': 'arabic', 'da': 'danish', 'nl': 'dutch', 
                                       'en': 'english', 'fi': 'finnish', 'fr': 'french', 
                                       'de': 'german', 'hu': 'hungarian', 'it': 'italian', 
-                                      'no': 'norwegian', 'po': 'portuguese', 
-                                      'ro': 'romanian', 'ru': 'russian', 'sp': 'spanish', 
+                                      'no': 'norwegian', 'pt': 'portuguese',
+                                      'ro': 'romanian', 'ru': 'russian', 'es': 'spanish',
                                       'sw': 'swedish'}                
 
                 if lang := snowball_languages.get(project.get('language')):
@@ -609,7 +613,7 @@ def project_form(project):
             terminate_process('Annif')
             st.rerun()
 
-    elif project.get("F1@5"): # already evaluated // FIXME: this evaluates to false if F1@5 == 0 (unlikely but possible)
+    elif project.get("F1@5") is not None: # already evaluated
         pass
     elif evaluable:
         upload_action(project.get('project_id'), "Evaluate")
@@ -706,7 +710,7 @@ def backend_form(project, keys):
         st.error(f"Error fetching default parameters")
         return
 
-    params = project.get('backend_params')
+    params = project.get('backend_params') or {}
 
     st.subheader(f"{backend} parameters", divider="gray")
 
@@ -768,7 +772,7 @@ def backend_form(project, keys):
             #save_project(response)
 
 def eval_results(project):
-    if not project.get("F1@5"):
+    if project.get("F1@5") is None:
         return
 
     st.subheader("Evaluation", divider="grey")
