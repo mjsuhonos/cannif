@@ -712,6 +712,9 @@ def vocab_form(project):
 
             # Prefer vocab language if present
             lang = vocab.get("languages", [lang])[0]
+        elif selected_id:
+            # User typed a new (not yet loaded) vocab ID
+            vocab_id = selected_id
 
         if not is_loaded:
             st.badge("Use only letters, numbers, and underscores", icon=":material/check:")
