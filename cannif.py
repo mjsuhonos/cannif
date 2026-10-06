@@ -347,6 +347,11 @@ def upload_action(project_id, action):
             start_process(task_id, ANNIF_CMD + ["eval", project_id, source_path, "-M", dest_path])
             st.info(f"{action} is running", icon=":material/hourglass:")
 
+        elif "Optimize" == action:
+            dest_path = os.path.join(os.getcwd(), DATA_DIR, 'eval', project_id + ".tsv")
+            start_process(task_id, ANNIF_CMD + ["optimize", project_id, source_path, "-o", dest_path])
+            st.info(f"{action} is running", icon=":material/hourglass:")
+
         else:
             st.warning(f"{action} is not implemented yet", icon=":material/warning:")
 
@@ -476,6 +481,7 @@ def list_projects(projects):
     column_config = {
         "name": "Project",
         "vocab": "Vocab",
+        "vocab_size": "Size",
         "backend": "Backend",
         "language": "Language",
         "modification_time": st.column_config.DatetimeColumn("Modified"),
@@ -484,7 +490,7 @@ def list_projects(projects):
         "false_positive_rate": "FPR",
         "false_negative_rate": "FNR"
     }
-    column_order = ["name", "vocab", "backend", "language",
+    column_order = ["name", "vocab", "vocab_size", "backend", "language",
                     "modification_time", "is_trained", "F1@5",
                     "Precision@1", "Precision@3", "Precision@5",
                     "Recall_microavg", "false_positive_rate", "false_negative_rate", 
@@ -525,13 +531,13 @@ def project_metrics(df):
 
         col1, col2, col3 = st.columns(3)
         with col1:
-            st.bar_chart(df, sort="-F1@5", stack=False, x_label='',
+            st.bar_chart(df, sort="-F1@5", stack=False, x_label='', height=1000,
                         y=["Precision@1","Precision@3","Precision@5"])
         with col2:
-            st.bar_chart(df, sort="-F1@5", stack=False, x_label='',
+            st.bar_chart(df, sort="-F1@5", stack=False, x_label='', height=1000,
                         y=["Recall", "FPR", "FNR"])
         with col3:
-            st.bar_chart(df, sort="-F1@5", stack=False, x_label='',
+            st.bar_chart(df, sort="-F1@5", stack=False, x_label='', height=1000,
                         y=["NDCG", "NDCG@5", "NDCG@10"])
 
 def project_details(projects):
@@ -552,17 +558,25 @@ def project_details(projects):
         col1, col2 = st.columns(2)
         with col1:
             project_form(project)
-            eval_results(project)
 
         with col2:
             backend_form(project, projects.keys())
+        
+        # Second row for optimization and evaluation results
+        col3, col4 = st.columns(2)
+        with col3:
+            optimize_results(project)
+        
+        with col4:
+            eval_results(project)
 
     st.caption(f"{len(projects)} projects")
 
 def project_form(project):
     backend = project.get('backend')
     backends = ["dummy", "ensemble", "fasttext", "http", "mllm", "nn_ensemble",
-                "omikuji", "pav", "stwfsa", "svc", "tfidf", "yake"]
+                "threshold_ensemble", "omikuji", "pav", "stwfsa", "svc", "tfidf",
+                "yake"]
     backend_index = backends.index(backend) if backend else 0
 
     is_trained = True if project.get('is_trained') else False
@@ -661,6 +675,10 @@ def project_form(project):
         pass
     elif evaluable:
         upload_action(project.get('project_id'), "Evaluate")
+        # Check if optimization file already exists
+        optimize_filepath = os.path.join(os.getcwd(), DATA_DIR, 'eval', project.get('project_id') + ".tsv")
+        if not os.path.exists(optimize_filepath):
+            upload_action(project.get('project_id'), "Optimize")
     elif trainable:
         upload_action(project.get('project_id'), "Train")
         st.warning("Training is very resource-intensive!", icon=":material/warning:")
@@ -817,6 +835,94 @@ def backend_form(project, keys):
             st.json(project)
             st.json(response)
             #save_project(response)
+
+def optimize_results(project):
+    st.subheader("Optimization", divider="grey")
+
+    # add optimization metrics if they exist
+    filepath = os.path.join(os.getcwd(), DATA_DIR, 'eval', project['project_id'] + ".tsv")
+
+    try:
+        df = pd.read_csv(filepath, sep='\t')
+    except (FileNotFoundError, json.JSONDecodeError):
+        df = None
+
+    if df is None:
+        st.info("No optimization results found")
+        return
+    
+    # Check if we have the required columns
+    required_columns = ['Limit', 'Threshold', 'Precision (doc avg)', 'Recall (doc avg)', 'Pareto front']
+    if not all(col in df.columns for col in required_columns):
+        st.warning("Required columns for threshold charts not found in data")
+        return
+    
+    # Get all unique Limit values
+    limit_values = sorted(df['Limit'].unique())
+    
+    # Graph 1: Precision lines for each Limit value
+    precision_chart_data = []
+    for limit in limit_values:
+        limit_df = df[df['Limit'] == limit].sort_values('Threshold')
+        precision_data = limit_df[['Threshold', 'Precision (doc avg)']].copy()
+        precision_data = precision_data.rename(columns={'Precision (doc avg)': f'L={limit}'})
+        precision_chart_data.append(precision_data)
+    
+    # Graph 2: Recall lines for each Limit value
+    recall_chart_data = []
+    for limit in limit_values:
+        limit_df = df[df['Limit'] == limit].sort_values('Threshold')
+        recall_data = limit_df[['Threshold', 'Recall (doc avg)']].copy()
+        recall_data = recall_data.rename(columns={'Recall (doc avg)': f'L={limit}'})
+        recall_chart_data.append(recall_data)
+    
+    # Create columns for Precision/Threshold and Recall/Threshold
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        if precision_chart_data:
+            precision_df = precision_chart_data[0]
+            for data in precision_chart_data[1:]:
+                precision_df = pd.merge(precision_df, data, on='Threshold', how='outer')
+            precision_df = precision_df.set_index('Threshold')
+            st.subheader("Precision")
+            st.line_chart(precision_df, use_container_width=True)
+    
+    with col2:
+        if recall_chart_data:
+            recall_df = recall_chart_data[0]
+            for data in recall_chart_data[1:]:
+                recall_df = pd.merge(recall_df, data, on='Threshold', how='outer')
+            recall_df = recall_df.set_index('Threshold')
+            st.subheader("Recall")
+            st.line_chart(recall_df, use_container_width=True)
+    
+    # Pareto front in a new row below
+    # Handle different formats of the Pareto front column (boolean, 1/0, etc.)
+    try:
+        pareto_mask = df['Pareto front'].astype(bool)
+    except:
+        # If conversion to bool fails, try checking for non-zero/non-null values
+        pareto_mask = df['Pareto front'].notna() & (df['Pareto front'] != 0)
+    
+    pareto_rows = df[pareto_mask]
+    
+    if len(pareto_rows) > 0:
+        # Pareto front scatter chart (Precision vs Recall) - grouped by Limit
+        pareto_scatter_by_limit = []
+        for limit in limit_values:
+            limit_pareto = pareto_rows[pareto_rows['Limit'] == limit]
+            if len(limit_pareto) > 0:
+                scatter_data = limit_pareto[['Precision (doc avg)', 'Recall (doc avg)']].copy()
+                scatter_data['Group'] = f'L={limit}'
+                pareto_scatter_by_limit.append(scatter_data)
+        
+        if pareto_scatter_by_limit:
+            all_scatter_limit = pd.concat(pareto_scatter_by_limit, ignore_index=True)
+            st.subheader("Precision vs Recall (Pareto)")
+            st.scatter_chart(all_scatter_limit, x='Precision (doc avg)', y='Recall (doc avg)', color='Group', use_container_width=True)
+        
+
 
 def eval_results(project):
     if project.get("F1@5") is None:
