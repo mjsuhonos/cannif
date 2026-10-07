@@ -9,6 +9,7 @@ import subprocess
 import threading
 import time
 import tempfile
+import altair as alt
 
 from annif.config import find_config
 from annif.registry import AnnifRegistry
@@ -986,15 +987,29 @@ def optimize_results(project):
 
         with col1:
             st.write("**Precision**")
-            st.line_chart(chart_df.rename(columns={'Precision (doc avg)': 'Precision'}),
-                          x='Threshold', y='Precision', color='Limit',
-                          x_label='', y_label='', width='stretch')
+            st.altair_chart(
+                alt.Chart(chart_df.rename(columns={'Precision (doc avg)': 'Precision'}))
+                .mark_line()
+                .encode(
+                    x=alt.X('Threshold:Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
+                    y=alt.Y('Precision:Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
+                    color=alt.Color('Limit:N', legend=alt.Legend(orient='bottom')),
+                    tooltip=['Threshold', 'Limit', 'Precision'],
+                ),
+                width='stretch')
 
         with col2:
             st.write("**Recall**")
-            st.line_chart(chart_df.rename(columns={'Recall (doc avg)': 'Recall'}),
-                          x='Threshold', y='Recall', color='Limit',
-                          x_label='', y_label='', width='stretch')
+            st.altair_chart(
+                alt.Chart(chart_df.rename(columns={'Recall (doc avg)': 'Recall'}))
+                .mark_line()
+                .encode(
+                    x=alt.X('Threshold:Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
+                    y=alt.Y('Recall:Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
+                    color=alt.Color('Limit:N', legend=alt.Legend(orient='bottom')),
+                    tooltip=['Threshold', 'Limit', 'Recall'],
+                ),
+                width='stretch')
 
     with st.container(border=True):
         # Pareto front in a new row below
@@ -1012,7 +1027,16 @@ def optimize_results(project):
             if pareto_scatter_by_limit:
                 all_scatter_limit = pd.concat(pareto_scatter_by_limit, ignore_index=True)
                 st.write("**Recall vs Precision (Pareto)**")
-                st.scatter_chart(all_scatter_limit, x='Precision (doc avg)', y='Recall (doc avg)', color='Limit', x_label='', y_label='', width='stretch')
+                st.altair_chart(
+                    alt.Chart(all_scatter_limit)
+                    .mark_circle(size=100)
+                    .encode(
+                        x=alt.X('Precision (doc avg):Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
+                        y=alt.Y('Recall (doc avg):Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
+                        color=alt.Color('Limit:N', legend=alt.Legend(orient='bottom')),
+                        tooltip=['Limit', 'Precision (doc avg)', 'Recall (doc avg)'],
+                    ),
+                    width='stretch')
 
 
 def eval_results(project):
@@ -1049,24 +1073,39 @@ def eval_results(project):
         if rows:
             df = pd.DataFrame(rows)
 
-            # sort metrics by mean value, then reshape wide so each
-            # averaging method becomes its own grouped bar series
+            # sort metrics by mean value for a stable bar order
             order = df.groupby("Metric")["Value"].mean().sort_values().index
-            pivoted = df.pivot(index="Metric", columns="Averaging", values="Value").reindex(order)
 
-            st.bar_chart(pivoted, horizontal=True, stack=False, sort=False,
-                         height=400, width='stretch')
+            st.altair_chart(
+                alt.Chart(df).mark_bar().encode(
+                    x=alt.X('Value:Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
+                    y=alt.Y('Metric:N', sort=list(order), title=None),
+                    color=alt.Color('Averaging:N', legend=alt.Legend(orient='bottom')),
+                    yOffset='Averaging:N',
+                ),
+                width='stretch', height=400)
 
         # --- @k metrics: small x-y charts, F1@5 as a metric tile ---
+        # Y axes are pinned to 0.0..1.0; X is @k, so it stays on the k scale
         col1, col2 = st.columns(2)
         with col1:
-            precision_df = pd.DataFrame({"@k": [1, 3, 5],
-                                          "Precision": [project["Precision@1"], project["Precision@3"], project["Precision@5"]]}).set_index("@k")
-            st.line_chart(precision_df, x_label="@k", y_label="Precision", height=250)
+            precision_df = pd.DataFrame({"k": [1, 3, 5],
+                                          "Precision": [project["Precision@1"], project["Precision@3"], project["Precision@5"]]})
+            st.altair_chart(
+                alt.Chart(precision_df).mark_line().encode(
+                    x=alt.X('k:Q', title='@k'),
+                    y=alt.Y('Precision:Q', scale=alt.Scale(domain=[0.0, 1.0]), title='Precision'),
+                ),
+                width='stretch', height=250)
         with col2:
-            ndcg_df = pd.DataFrame({"@k": [1, 5, 10],
-                                    "NDCG": [project["NDCG"], project["NDCG@5"], project["NDCG@10"]]}).set_index("@k")
-            st.line_chart(ndcg_df, x_label="@k", y_label="NDCG", height=250)
+            ndcg_df = pd.DataFrame({"k": [1, 5, 10],
+                                    "NDCG": [project["NDCG"], project["NDCG@5"], project["NDCG@10"]]})
+            st.altair_chart(
+                alt.Chart(ndcg_df).mark_line().encode(
+                    x=alt.X('k:Q', title='@k'),
+                    y=alt.Y('NDCG:Q', scale=alt.Scale(domain=[0.0, 1.0]), title='NDCG'),
+                ),
+                width='stretch', height=250)
 
 ##########
 def main():
