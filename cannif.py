@@ -237,10 +237,13 @@ def get_projects():
 
         projects[project_id] = {**values, **metrics}
 
-        # add evaluated/optimized flags if result files exist
-        projects[project_id]["is_evaluated"] = os.path.exists(filepath)
+        # add evaluated/optimized flags if usable result files exist;
+        # both commands create their output file at startup, so a running
+        # (or failed) job would otherwise leave an empty file behind
+        projects[project_id]["is_evaluated"] = bool(metrics)
         optimize_filepath = os.path.join(os.getcwd(), DATA_DIR, 'eval', project_id + ".tsv")
-        projects[project_id]["is_optimized"] = os.path.exists(optimize_filepath)
+        projects[project_id]["is_optimized"] = (os.path.exists(optimize_filepath)
+                                               and os.path.getsize(optimize_filepath) > 0)
 
     return projects
 
@@ -301,19 +304,20 @@ def upload_action(project_id, action):
     task_id = f"{action} {project_id}"
 
     entry = get_process(task_id)
-    if entry and entry.get("status") is None:
-        # Process is still running — don't allow a second submission.
-        st.info(f"{action} is running", icon=":material/hourglass:")
-        return
+    is_running = bool(entry and entry.get("status") is None)
 
     with st.container(border=True):
-        button_col, file_col = st.columns([1, 3], vertical_alignment="center")
-
-        with button_col:
-            uploader = st.empty()
+        file_col, button_col = st.columns([3, 1], vertical_alignment="center")
 
         uploaded_file = file_col.file_uploader("**Upload File**", key=f"{task_id}_file",
                                         type=["tsv", "csv", "json", "jsonl", "ttl", "nt"])
+
+        uploader = button_col.empty()
+
+    if is_running:
+        # Process is still running — show status in place of the button.
+        uploader.info(f"{action} is running", icon=":material/hourglass:")
+        return
 
     # Save upload as temporary file
     if uploaded_file:
@@ -360,24 +364,25 @@ def upload_action(project_id, action):
                     st.error("Error loading vocab:")
                     st.code(e.stderr)
 
+            uploader.write(' ') # Clear the button
+
+        elif "Optimize" == action:
+            dest_path = os.path.join(os.getcwd(), DATA_DIR, 'eval', project_id + ".tsv")
+            start_process(task_id, ANNIF_CMD + ["optimize", project_id, source_path, "-r", dest_path])
+            uploader.info(f"{action} is running", icon=":material/hourglass:")
+
         elif "Train" == action:
             start_process(task_id, ANNIF_CMD + ["train", project_id, source_path])
-            st.info(f"{action} is running", icon=":material/hourglass:")
+            uploader.info(f"{action} is running", icon=":material/hourglass:")
 
         elif "Evaluate" == action:
             dest_path = os.path.join(os.getcwd(), DATA_DIR, 'eval', project_id + ".json")
             start_process(task_id, ANNIF_CMD + ["eval", project_id, source_path, "-M", dest_path])
-            st.info(f"{action} is running", icon=":material/hourglass:")
-
-        elif "Optimize" == action:
-            dest_path = os.path.join(os.getcwd(), DATA_DIR, 'eval', project_id + ".tsv")
-            start_process(task_id, ANNIF_CMD + ["optimize", project_id, source_path, "-o", dest_path])
-            st.info(f"{action} is running", icon=":material/hourglass:")
+            uploader.info(f"{action} is running", icon=":material/hourglass:")
 
         else:
             st.warning(f"{action} is not implemented yet", icon=":material/warning:")
 
-        uploader.write(' ') # Clear the button
         return uploaded_file
 
     # remove the button if a vocab is loaded in session
@@ -597,7 +602,7 @@ def project_metrics(df, projects):
                 st.write("**Recall vs Precision (Pareto)**")
                 st.scatter_chart(all_pareto, x='Precision (doc avg)', y='Recall (doc avg)',
                                 color='Project', x_label='', y_label='',
-                                use_container_width=True)
+                                width='stretch')
 
 def project_details(projects):
     # Get the selected row index (Streamlit stores it in session state)
@@ -637,7 +642,7 @@ def project_form(project):
     backend_index = backends.index(backend) if backend else 0
 
     is_trained = True if project.get('is_trained') else False
-    trainable = backend not in ("dummy", "ensemble", "yake")
+    trainable = backend not in ("dummy", "ensemble", "yake", "laya")
     evaluable = bool(is_trained) or not trainable
     
     # TODO: handle this condition better
@@ -732,9 +737,9 @@ def project_form(project):
         if not project.get('is_optimized'):
             upload_action(project.get('project_id'), "Optimize")
     elif evaluable:
-        upload_action(project.get('project_id'), "Evaluate")
         if not project.get('is_optimized'):
             upload_action(project.get('project_id'), "Optimize")
+        upload_action(project.get('project_id'), "Evaluate")
     elif trainable:
         upload_action(project.get('project_id'), "Train")
         st.warning("Training is very resource-intensive!", icon=":material/warning:")
@@ -803,7 +808,7 @@ def vocab_form(project):
 
         if is_loaded:
             size = compact_count(vocab.get('size'))
-            st.write(f"**Terms:** {size}")
+            st.metric(f"**Terms:**", size)
             
             project['vocab'] = vocab_id
             project['language'] = lang_id
@@ -893,10 +898,7 @@ def backend_form(project, keys):
             #save_project(response)
 
 def optimize_results(project):
-    # add optimization metrics if they exist
-    filepath = os.path.join(os.getcwd(), DATA_DIR, 'eval', project['project_id'] + ".tsv")
-
-    if not os.path.exists(filepath):
+    if not project.get('is_optimized'):
         return
 
     st.subheader("Optimized", divider="green")
@@ -929,13 +931,13 @@ def optimize_results(project):
             st.write("**Precision**")
             st.line_chart(chart_df.rename(columns={'Precision (doc avg)': 'Precision'}),
                           x='Threshold', y='Precision', color='Limit',
-                          x_label='', y_label='', use_container_width=True)
+                          x_label='', y_label='', width='stretch')
 
         with col2:
             st.write("**Recall**")
             st.line_chart(chart_df.rename(columns={'Recall (doc avg)': 'Recall'}),
                           x='Threshold', y='Recall', color='Limit',
-                          x_label='', y_label='', use_container_width=True)
+                          x_label='', y_label='', width='stretch')
 
     with st.container(border=True):
         # Pareto front in a new row below
@@ -953,7 +955,7 @@ def optimize_results(project):
             if pareto_scatter_by_limit:
                 all_scatter_limit = pd.concat(pareto_scatter_by_limit, ignore_index=True)
                 st.write("**Recall vs Precision (Pareto)**")
-                st.scatter_chart(all_scatter_limit, x='Precision (doc avg)', y='Recall (doc avg)', color='Limit', x_label='', y_label='', use_container_width=True)
+                st.scatter_chart(all_scatter_limit, x='Precision (doc avg)', y='Recall (doc avg)', color='Limit', x_label='', y_label='', width='stretch')
 
 
 def eval_results(project):
@@ -996,7 +998,7 @@ def eval_results(project):
             pivoted = df.pivot(index="Metric", columns="Averaging", values="Value").reindex(order)
 
             st.bar_chart(pivoted, horizontal=True, stack=False, sort=False,
-                         height=400, use_container_width=True)
+                         height=400, width='stretch')
 
         # --- @k metrics: small x-y charts, F1@5 as a metric tile ---
         col1, col2 = st.columns(2)
