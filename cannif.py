@@ -300,6 +300,46 @@ def pareto_front_rows(df):
     pareto_rows = df[pareto_mask]
     return pareto_rows if len(pareto_rows) > 0 else None
 
+def launch_action(project_id, action, source_path, extra_args=()):
+    # Start an Annif command for a project in a background process
+    task_id = f"{action} {project_id}"
+
+    if "Train" == action:
+        start_process(task_id, ANNIF_CMD + ["train", project_id, source_path, *extra_args])
+
+    elif "Evaluate" == action:
+        dest_path = os.path.join(os.getcwd(), DATA_DIR, 'eval', project_id + ".json")
+        start_process(task_id, ANNIF_CMD + ["eval", project_id, source_path, *extra_args, "-M", dest_path])
+
+    elif "Optimize" == action:
+        dest_path = os.path.join(os.getcwd(), DATA_DIR, 'eval', project_id + ".tsv")
+        start_process(task_id, ANNIF_CMD + ["optimize", project_id, source_path, *extra_args, "-r", dest_path])
+
+    else:
+        st.warning(f"{action} is not implemented yet", icon=":material/warning:")
+
+@st.dialog("Annif parameters")
+def action_modal():
+    # Options form for launching a project action
+    launch = st.session_state.get("action_launch")
+    if not launch:
+        return
+
+    action = launch["action"]
+    project_id = launch["project_id"]
+    source_path = launch["source_path"]
+
+    st.write(f"**{action} {project_id}**")
+
+    jobs = st.slider("Parallel jobs (`-j`)", min_value=0, max_value=os.cpu_count() or 1,
+                     value=0, step=1, help="Number of parallel jobs; 0 means all CPUs")
+
+    if st.button(action, type="primary"):
+        extra_args = ["-j", str(jobs)]
+        launch_action(project_id, action, source_path, extra_args)
+        del st.session_state.action_launch
+        st.rerun() # close the modal; the running status shows in the button slot
+
 def upload_action(project_id, action):
     task_id = f"{action} {project_id}"
 
@@ -307,7 +347,7 @@ def upload_action(project_id, action):
     is_running = bool(entry and entry.get("status") is None)
 
     with st.container(border=True):
-        file_col, button_col = st.columns([3, 1], vertical_alignment="center")
+        file_col, button_col = st.columns([1, 1], vertical_alignment="center")
 
         uploaded_file = file_col.file_uploader("**Upload File**", key=f"{task_id}_file",
                                         type=["tsv", "csv", "json", "jsonl", "ttl", "nt"])
@@ -366,22 +406,13 @@ def upload_action(project_id, action):
 
             uploader.write(' ') # Clear the button
 
-        elif "Optimize" == action:
-            dest_path = os.path.join(os.getcwd(), DATA_DIR, 'eval', project_id + ".tsv")
-            start_process(task_id, ANNIF_CMD + ["optimize", project_id, source_path, "-r", dest_path])
-            uploader.info(f"{action} is running", icon=":material/hourglass:")
-
-        elif "Train" == action:
-            start_process(task_id, ANNIF_CMD + ["train", project_id, source_path])
-            uploader.info(f"{action} is running", icon=":material/hourglass:")
-
-        elif "Evaluate" == action:
-            dest_path = os.path.join(os.getcwd(), DATA_DIR, 'eval', project_id + ".json")
-            start_process(task_id, ANNIF_CMD + ["eval", project_id, source_path, "-M", dest_path])
-            uploader.info(f"{action} is running", icon=":material/hourglass:")
-
         else:
-            st.warning(f"{action} is not implemented yet", icon=":material/warning:")
+            st.session_state.action_launch = {
+                "project_id": project_id,
+                "action": action,
+                "source_path": source_path,
+            }
+            action_modal()
 
         return uploaded_file
 
@@ -433,6 +464,32 @@ def process_usage(entry):
     col1.caption(f"User CPU: {nice_utime}")
     col2.caption(f"System CPU: {nice_stime}")
     col3.caption(f"Max RSS: {nice_rss}")
+
+@st.fragment(run_every=5)
+def task_watcher():
+    # Poll background tasks on a timer; when one finishes, trigger a full
+    # rerun so statuses, flags and result containers refresh automatically
+    st.empty()
+
+    with process_registry["lock"]:
+        keys = list(process_registry["processes"].keys())
+
+    running = set()
+    for key in keys:
+        # get_process also reaps finished processes (os.wait4 WNOHANG)
+        entry = get_process(key)
+        if entry and entry.get("status") is None:
+            running.add(key)
+
+    prev = st.session_state.get("watched_tasks")
+    if prev is None:
+        st.session_state.watched_tasks = running
+        return
+
+    st.session_state.watched_tasks = running
+
+    if prev - running: # at least one task completed since the last tick
+        st.rerun()
 
 def process_dashboard():
     with process_registry["lock"]:
@@ -808,7 +865,7 @@ def vocab_form(project):
 
         if is_loaded:
             size = compact_count(vocab.get('size'))
-            st.metric(f"**Terms:**", size)
+            st.write(f"**Terms:** {size}")
             
             project['vocab'] = vocab_id
             project['language'] = lang_id
@@ -1031,6 +1088,8 @@ def main():
     project_details(projects)
 
     project_metrics(df, projects)
+
+    task_watcher()
 
     process_dashboard()
 
