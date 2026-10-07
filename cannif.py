@@ -270,15 +270,6 @@ def format_seconds(sec):
     except Exception:
         return f"{sec:.1f}s"
 
-def show_bar_chart(data):
-    it = iter(data)
-    first_key = next(it)
-    second_key = next(it)
-
-    df = pd.DataFrame(data).set_index(first_key)
-    st.write(f'**{second_key}**')
-    st.bar_chart(df, horizontal=True, sort=False)
-
 def upload_action(project_id, action):
     task_id = f"{action} {project_id}"
 
@@ -414,7 +405,7 @@ def process_dashboard():
     if not items:
         return
 
-    with st.expander("**Tasks**", expanded=False, icon=":material/manage_history:"):
+    with st.expander("**Tasks**", expanded=False, icon=":material/manage_history:", type="compact"):
         for key, entry in items:
             # Refresh process status, usage, stdout/stderr
             entry = get_process(key)
@@ -506,9 +497,12 @@ def list_projects(projects):
 
     df["is_trained"] = df["is_trained"].apply(lambda x: "✔" if x else "-")
 
-    st.dataframe(df, hide_index=True, column_config=column_config,
+    with st.expander(f"**{len(projects)} Projects**", expanded=True, icon=":material/assignment:", type="compact"):
+        st.dataframe(df, hide_index=True, column_config=column_config,
                 column_order=column_order, key="table",
                 selection_mode="single-row", on_select="rerun")
+
+        new_project()
 
     # pass the formatted dataframe back for metrics
     return df
@@ -527,17 +521,17 @@ def project_metrics(df):
                     "false_positive_rate": "FPR",
                     "false_negative_rate": "FNR"})
     
-    with st.expander("**Metrics**", expanded=False, icon=":material/bar_chart:"):
+    with st.expander("**Metrics**", expanded=False, icon=":material/bar_chart:", type="compact"):
 
         col1, col2, col3 = st.columns(3)
         with col1:
-            st.bar_chart(df, sort="-F1@5", stack=False, x_label='', height=1000,
+            st.bar_chart(df, sort="-F1@5", stack=False, x_label='', height=500,
                         y=["Precision@1","Precision@3","Precision@5"])
         with col2:
-            st.bar_chart(df, sort="-F1@5", stack=False, x_label='', height=1000,
+            st.bar_chart(df, sort="-F1@5", stack=False, x_label='', height=500,
                         y=["Recall", "FPR", "FNR"])
         with col3:
-            st.bar_chart(df, sort="-F1@5", stack=False, x_label='', height=1000,
+            st.bar_chart(df, sort="-F1@5", stack=False, x_label='', height=500,
                         y=["NDCG", "NDCG@5", "NDCG@10"])
 
 def project_details(projects):
@@ -570,13 +564,11 @@ def project_details(projects):
         with col4:
             eval_results(project)
 
-    st.caption(f"{len(projects)} projects")
-
 def project_form(project):
     backend = project.get('backend')
     backends = ["dummy", "ensemble", "fasttext", "http", "mllm", "nn_ensemble",
                 "threshold_ensemble", "omikuji", "pav", "stwfsa", "svc", "tfidf",
-                "yake"]
+                "yake", "laya"]
     backend_index = backends.index(backend) if backend else 0
 
     is_trained = True if project.get('is_trained') else False
@@ -859,7 +851,7 @@ def optimize_results(project):
     
     # Get all unique Limit values
     limit_values = sorted(df['Limit'].unique())
-    
+
     # Graph 1: Precision lines for each Limit value
     precision_chart_data = []
     for limit in limit_values:
@@ -867,7 +859,7 @@ def optimize_results(project):
         precision_data = limit_df[['Threshold', 'Precision (doc avg)']].copy()
         precision_data = precision_data.rename(columns={'Precision (doc avg)': f'L={limit}'})
         precision_chart_data.append(precision_data)
-    
+
     # Graph 2: Recall lines for each Limit value
     recall_chart_data = []
     for limit in limit_values:
@@ -875,28 +867,28 @@ def optimize_results(project):
         recall_data = limit_df[['Threshold', 'Recall (doc avg)']].copy()
         recall_data = recall_data.rename(columns={'Recall (doc avg)': f'L={limit}'})
         recall_chart_data.append(recall_data)
-    
+
     # Create columns for Precision/Threshold and Recall/Threshold
     col1, col2 = st.columns(2)
-    
+
     with col1:
         if precision_chart_data:
             precision_df = precision_chart_data[0]
             for data in precision_chart_data[1:]:
                 precision_df = pd.merge(precision_df, data, on='Threshold', how='outer')
             precision_df = precision_df.set_index('Threshold')
-            st.subheader("Precision")
+            st.write("**Precision**")
             st.line_chart(precision_df, use_container_width=True)
-    
+
     with col2:
         if recall_chart_data:
             recall_df = recall_chart_data[0]
             for data in recall_chart_data[1:]:
                 recall_df = pd.merge(recall_df, data, on='Threshold', how='outer')
             recall_df = recall_df.set_index('Threshold')
-            st.subheader("Recall")
+            st.write("**Recall**")
             st.line_chart(recall_df, use_container_width=True)
-    
+
     # Pareto front in a new row below
     # Handle different formats of the Pareto front column (boolean, 1/0, etc.)
     try:
@@ -908,7 +900,7 @@ def optimize_results(project):
     pareto_rows = df[pareto_mask]
     
     if len(pareto_rows) > 0:
-        # Pareto front scatter chart (Precision vs Recall) - grouped by Limit
+        # Pareto front scatter chart (Recall vs Precision) - grouped by Limit
         pareto_scatter_by_limit = []
         for limit in limit_values:
             limit_pareto = pareto_rows[pareto_rows['Limit'] == limit]
@@ -919,7 +911,7 @@ def optimize_results(project):
         
         if pareto_scatter_by_limit:
             all_scatter_limit = pd.concat(pareto_scatter_by_limit, ignore_index=True)
-            st.subheader("Precision vs Recall (Pareto)")
+            st.write("**Recall vs Precision (Pareto)**")
             st.scatter_chart(all_scatter_limit, x='Precision (doc avg)', y='Recall (doc avg)', color='Group', use_container_width=True)
         
 
@@ -929,23 +921,52 @@ def eval_results(project):
         return
 
     st.subheader("Evaluation", divider="grey")
-    
-    numdocs = compact_count(project.get('Documents_evaluated'))
-    st.write(f"**Documents Evaluated:** {numdocs}")
 
-    data = {"Cutoff": ["@1", "@3", "@5"],
-            "Precision": [project["Precision@1"], project["Precision@3"], project["Precision@5"]]}
-    show_bar_chart(data)
+    # --- Counts: metric tiles, not a chart ---
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("**Documents**", f"{project['Documents_evaluated']:,}")
+    c2.metric("**True positives**", f"{project['True_positives']:,}")
+    c3.metric("**False positives**", f"{project['False_positives']:,}")
+    c4.metric("**False negatives**", f"{project['False_negatives']:,}")
 
-    data = {"Metric": ["Recall", "FPR", "FNR"],
-            "Percent": [project["Recall_microavg"] * 100,
-                        project["false_positive_rate"] * 100,
-                        project["false_negative_rate"] * 100]}
-    show_bar_chart(data)
+    # --- Rate metrics: one horizontal bar chart ---
+    # longer suffixes must come first so e.g. "_weighted_subj_avg"
+    # doesn't match "_subj_avg"
+    groups = {"weighted_subj_avg": "Weighted subject avg",
+              "doc_avg": "Document avg",
+              "microavg": "Micro avg"}
+    rows = []
+    for key, val in project.items():
+        for suffix, label in groups.items():
+            if key.endswith("_" + suffix):
+                metric = key.removesuffix("_" + suffix)
+                rows.append({"Metric": metric, "Averaging": label, "Value": val})
+                break
 
-    data = {"Cutoff": ["@1", "@5", "@10"],
-            "NDCG": [project["NDCG"], project["NDCG@5"], project["NDCG@10"]]}
-    show_bar_chart(data)
+    st.progress(project["F1@5"], text=f"F1@5 = {project['F1@5']:.4f}")
+    st.space()
+
+    if rows:
+        df = pd.DataFrame(rows)
+
+        # sort metrics by mean value, then reshape wide so each
+        # averaging method becomes its own grouped bar series
+        order = df.groupby("Metric")["Value"].mean().sort_values().index
+        pivoted = df.pivot(index="Metric", columns="Averaging", values="Value").reindex(order)
+
+        st.bar_chart(pivoted, horizontal=True, stack=False, sort=False,
+                     height=400, use_container_width=True)
+
+    # --- @k metrics: small x-y charts, F1@5 as a metric tile ---
+    col1, col2 = st.columns(2)
+    with col1:
+        precision_df = pd.DataFrame({"@k": [1, 3, 5],
+                                      "Precision": [project["Precision@1"], project["Precision@3"], project["Precision@5"]]}).set_index("@k")
+        st.line_chart(precision_df, x_label="@k", y_label="Precision", height=250)
+    with col2:
+        ndcg_df = pd.DataFrame({"@k": [1, 5, 10],
+                                "NDCG": [project["NDCG"], project["NDCG@5"], project["NDCG@10"]]}).set_index("@k")
+        st.line_chart(ndcg_df, x_label="@k", y_label="NDCG", height=250)
 
 ##########
 def main():
@@ -959,8 +980,6 @@ def main():
         st.caption(f"Annif {version} at {ANNIF_API}")
     else:
         exit()
-
-    new_project()
 
     projects = get_projects()
 
