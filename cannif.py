@@ -275,6 +275,28 @@ def format_seconds(sec):
     except Exception:
         return f"{sec:.1f}s"
 
+def load_optimize_results(project_id):
+    # Load a project's optimize results file, if present
+    filepath = os.path.join(os.getcwd(), DATA_DIR, 'eval', project_id + ".tsv")
+    try:
+        return pd.read_csv(filepath, sep='\t')
+    except Exception:
+        return None
+
+def pareto_front_rows(df):
+    # Extract the Pareto-front rows from optimize results
+    if 'Pareto front' not in df.columns:
+        return None
+
+    # Handle different formats of the Pareto front column (boolean, 1/0, etc.)
+    try:
+        pareto_mask = df['Pareto front'].astype(bool)
+    except Exception:
+        pareto_mask = df['Pareto front'].notna() & (df['Pareto front'] != 0)
+
+    pareto_rows = df[pareto_mask]
+    return pareto_rows if len(pareto_rows) > 0 else None
+
 def upload_action(project_id, action):
     task_id = f"{action} {project_id}"
 
@@ -520,32 +542,62 @@ def list_projects(projects):
     # pass the formatted dataframe back for metrics
     return df
 
-def project_metrics(df):
+def project_metrics(df, projects):
     if df is None or df.empty:
         return
-    
-    # if there are metrics, show graphs
-    if not df["F1@5"].notna().any():
+
+    # gather Pareto fronts from all optimized projects
+    pareto_frames = []
+    for project_id, project in projects.items():
+        if not project.get('is_optimized'):
+            continue
+
+        opt_df = load_optimize_results(project_id)
+        if opt_df is None:
+            continue
+
+        pareto_rows = pareto_front_rows(opt_df)
+        if pareto_rows is not None:
+            frame = pareto_rows[['Precision (doc avg)', 'Recall (doc avg)']].copy()
+            frame['Project'] = project.get('name') or project_id
+            pareto_frames.append(frame)
+
+    # if there are metrics or Pareto fronts, show graphs
+    has_metrics = df["F1@5"].notna().any()
+
+    if not has_metrics and not pareto_frames:
         return
-    
-    df = df.set_index("name").dropna(subset=["F1@5"])
-    df = df.rename(columns={
-                    "Recall_microavg": "Recall",
-                    "false_positive_rate": "FPR",
-                    "false_negative_rate": "FNR"})
-    
+
     with st.expander("**Metrics**", expanded=False, icon=":material/bar_chart:"):
 
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            st.bar_chart(df, sort="-F1@5", stack=False, x_label='', height=500,
-                        y=["Precision@1","Precision@3","Precision@5"])
-        with col2:
-            st.bar_chart(df, sort="-F1@5", stack=False, x_label='', height=500,
-                        y=["Recall", "FPR", "FNR"])
-        with col3:
-            st.bar_chart(df, sort="-F1@5", stack=False, x_label='', height=500,
-                        y=["NDCG", "NDCG@5", "NDCG@10"])
+        if has_metrics:
+            eval_df = df.set_index("name").dropna(subset=["F1@5"])
+            eval_df = eval_df.rename(columns={
+                            "Recall_microavg": "Recall",
+                            "false_positive_rate": "FPR",
+                            "false_negative_rate": "FNR"})
+
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                with st.container(border=True):
+                    st.bar_chart(eval_df, sort="-F1@5", stack=False, x_label='', height=500,
+                                y=["Precision@1","Precision@3","Precision@5"])
+            with col2:
+                with st.container(border=True):
+                    st.bar_chart(eval_df, sort="-F1@5", stack=False, x_label='', height=500,
+                                y=["Recall", "FPR", "FNR"])
+            with col3:
+                with st.container(border=True):
+                    st.bar_chart(eval_df, sort="-F1@5", stack=False, x_label='', height=500,
+                                y=["NDCG", "NDCG@5", "NDCG@10"])
+
+        if pareto_frames:
+            all_pareto = pd.concat(pareto_frames, ignore_index=True)
+            with st.container(border=True):
+                st.write("**Recall vs Precision (Pareto)**")
+                st.scatter_chart(all_pareto, x='Precision (doc avg)', y='Recall (doc avg)',
+                                color='Project', x_label='', y_label='',
+                                use_container_width=True)
 
 def project_details(projects):
     # Get the selected row index (Streamlit stores it in session state)
@@ -849,10 +901,7 @@ def optimize_results(project):
 
     st.subheader("Optimized", divider="green")
 
-    try:
-        df = pd.read_csv(filepath, sep='\t')
-    except (FileNotFoundError, json.JSONDecodeError):
-        df = None
+    df = load_optimize_results(project['project_id'])
 
     if df is None:
         st.info("No optimization results found")
@@ -890,16 +939,8 @@ def optimize_results(project):
 
     with st.container(border=True):
         # Pareto front in a new row below
-        # Handle different formats of the Pareto front column (boolean, 1/0, etc.)
-        try:
-            pareto_mask = df['Pareto front'].astype(bool)
-        except:
-            # If conversion to bool fails, try checking for non-zero/non-null values
-            pareto_mask = df['Pareto front'].notna() & (df['Pareto front'] != 0)
-    
-        pareto_rows = df[pareto_mask]
-    
-        if len(pareto_rows) > 0:
+        pareto_rows = pareto_front_rows(df)
+        if pareto_rows is not None:
             # Pareto front scatter chart (Recall vs Precision) - grouped by Limit
             pareto_scatter_by_limit = []
             for limit in limit_values:
@@ -987,7 +1028,7 @@ def main():
 
     project_details(projects)
 
-    project_metrics(df)
+    project_metrics(df, projects)
 
     process_dashboard()
 
