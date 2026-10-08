@@ -350,11 +350,14 @@ def upload_action(project_id, action):
     entry = get_process(task_id)
     is_running = bool(entry and entry.get("status") is None)
 
-    with st.container(border=True):
+    action_container = st.container(border=True)
+
+    with action_container:
         file_col, button_col = st.columns([2, 1], vertical_alignment="center")
 
         uploaded_file = file_col.file_uploader("**Upload File**", key=f"{task_id}_file",
                                         type=["tsv", "csv", "json", "jsonl", "ttl", "nt"])
+
         uploader = button_col.empty()
 
     if is_running:
@@ -368,10 +371,20 @@ def upload_action(project_id, action):
                 tmp.write(uploaded_file.read())
                 tmp_path = tmp.name
 
-    if uploader.button(action, type="primary", width="stretch"):
+    if action == "Train":
+        icon = ":material/model_training:"
+    elif action == "Optimize":
+        icon = ":material/tune:"
+    elif action == "Evaluate":
+        icon = ":material/analytics:"
+    else:
+        icon = None
+
+    if uploader.button(action, type="primary", width="stretch", icon=icon):
         if not uploaded_file:
-            st.error("No file uploaded")
-            return
+            with action_container:
+                st.error("No file uploaded")
+                return
 
         source_path = tmp_path
 
@@ -645,15 +658,15 @@ def project_metrics(df, projects):
             col1, col2, col3 = st.columns(3)
             with col1:
                 with st.container(border=True):
-                    st.bar_chart(eval_df, sort="-F1@5", stack=False, x_label='', height=500,
+                    st.bar_chart(eval_df, sort="-F1@5", stack=False, x_label='',
                                 y=["Precision@1","Precision@3","Precision@5"])
             with col2:
                 with st.container(border=True):
-                    st.bar_chart(eval_df, sort="-F1@5", stack=False, x_label='', height=500,
+                    st.bar_chart(eval_df, sort="-F1@5", stack=False, x_label='',
                                 y=["Recall", "FPR", "FNR"])
             with col3:
                 with st.container(border=True):
-                    st.bar_chart(eval_df, sort="-F1@5", stack=False, x_label='', height=500,
+                    st.bar_chart(eval_df, sort="-F1@5", stack=False, x_label='',
                                 y=["NDCG", "NDCG@5", "NDCG@10"])
 
         if pareto_frames:
@@ -1074,7 +1087,7 @@ def eval_results(project):
         for suffix, label in groups.items():
             if key.endswith("_" + suffix):
                 metric = key.removesuffix("_" + suffix)
-                rows.append({"Metric": metric, "Averaging": label, "Value": val})
+                rows.append({"Metric": metric, "Type": label, "Value": val})
                 break
 
     with st.container(border=True):
@@ -1091,8 +1104,8 @@ def eval_results(project):
                 alt.Chart(df).mark_bar().encode(
                     x=alt.X('Value:Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
                     y=alt.Y('Metric:N', sort=list(order), title=None),
-                    color=alt.Color('Averaging:N', legend=alt.Legend(orient='bottom')),
-                    yOffset='Averaging:N',
+                    color=alt.Color('Type:N', legend=alt.Legend(orient='bottom')),
+                    yOffset='Type:N',
                 ),
                 width='stretch', height=400)
 
