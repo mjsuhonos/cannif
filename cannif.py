@@ -341,6 +341,9 @@ def action_modal():
         del st.session_state.action_launch
         st.rerun() # close the modal; the running status shows in the button slot
 
+    if action == "Train":
+        st.warning("Training is very resource-intensive!", icon=":material/warning:")
+
 def upload_action(project_id, action):
     task_id = f"{action} {project_id}"
 
@@ -348,11 +351,10 @@ def upload_action(project_id, action):
     is_running = bool(entry and entry.get("status") is None)
 
     with st.container(border=True):
-        file_col, button_col = st.columns([1, 1], vertical_alignment="center")
+        file_col, button_col = st.columns([2, 1], vertical_alignment="center")
 
         uploaded_file = file_col.file_uploader("**Upload File**", key=f"{task_id}_file",
                                         type=["tsv", "csv", "json", "jsonl", "ttl", "nt"])
-
         uploader = button_col.empty()
 
     if is_running:
@@ -800,7 +802,6 @@ def project_form(project):
         upload_action(project.get('project_id'), "Evaluate")
     elif trainable:
         upload_action(project.get('project_id'), "Train")
-        st.warning("Training is very resource-intensive!", icon=":material/warning:")
 
 def vocab_form(project):
     vocabs = get_vocabs()
@@ -896,34 +897,44 @@ def backend_form(project, keys):
 
     params = project.get('backend_params') or {}
 
-    st.subheader(f"{backend} parameters", divider="gray")
+    st.subheader(backend, divider="gray")
+
+    filtered_backend = {}
+
+    # FIXME: this needs to be refactored
+    def param_widget(key, default_value):
+        if key in params:
+            try:
+                # Convert backend value to the type of default value
+                backend_value = type(default_value)(params[key])
+            except (TypeError, ValueError):
+                backend_value = None
+
+            if backend_value != default_value:
+                filtered_backend[key] = backend_value
+
+        if isinstance(default_value, bool):
+            form_value = st.checkbox(f"{key} :gray-badge[Default: {default_value}]", value=params.get(key))
+        elif isinstance(default_value, (int, float)):
+            form_value = st.number_input(key, value=filtered_backend.get(key), placeholder=default_value)
+        else:
+            form_value = st.text_input(key, value=filtered_backend.get(key), placeholder=default_value)
+
+        if form_value is not None:
+            filtered_backend[key] = form_value
+
+    # Common limit and threshold parameters above the parameter container;
+    # Annif backends define a default for limit only, so fall back to 0.0
+    common_params = {"limit": 100, "threshold": 0.0}
+    common_params.update({k: v for k, v in default_params.items() if k in common_params})
+    for key, default_value in common_params.items():
+        param_widget(key, default_value)
 
     with st.container(border=True):
-        filtered_backend = {}
-
-        # FIXME: this needs to be refactored
         for key, default_value in default_params.items():
-            key_id = f"{project.get('project_id')}_{project.get('backend_id')}_{key}"
-
-            if key in params:
-                try:
-                    # Convert backend value to the type of default value
-                    backend_value = type(default_value)(params[key])
-                except (TypeError, ValueError):
-                    backend_value = None
-
-                if backend_value != default_value:
-                    filtered_backend[key] = backend_value
-
-            if isinstance(default_value, bool):
-                form_value = st.checkbox(f"{key} :gray-badge[Default: {default_params.get(key)}]", value=params.get(key))
-            elif isinstance(default_value, (int, float)):
-                form_value = st.number_input(key, value=filtered_backend.get(key), placeholder=default_params.get(key))
-            else:
-                form_value = st.text_input(key, value=filtered_backend.get(key), placeholder=default_params.get(key))
-
-            if form_value is not None:
-                filtered_backend[key] = form_value
+            if key in ("limit", "threshold"):
+                continue
+            param_widget(key, default_value)
 
         response = {
             "project_id": project.get('project_id'),
@@ -989,7 +1000,7 @@ def optimize_results(project):
             st.write("**Precision**")
             st.altair_chart(
                 alt.Chart(chart_df.rename(columns={'Precision (doc avg)': 'Precision'}))
-                .mark_line()
+                .mark_line(point=True)
                 .encode(
                     x=alt.X('Threshold:Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
                     y=alt.Y('Precision:Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
@@ -1002,7 +1013,7 @@ def optimize_results(project):
             st.write("**Recall**")
             st.altair_chart(
                 alt.Chart(chart_df.rename(columns={'Recall (doc avg)': 'Recall'}))
-                .mark_line()
+                .mark_line(point=True)
                 .encode(
                     x=alt.X('Threshold:Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
                     y=alt.Y('Recall:Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
@@ -1092,7 +1103,7 @@ def eval_results(project):
             precision_df = pd.DataFrame({"k": [1, 3, 5],
                                           "Precision": [project["Precision@1"], project["Precision@3"], project["Precision@5"]]})
             st.altair_chart(
-                alt.Chart(precision_df).mark_line().encode(
+                alt.Chart(precision_df).mark_line(point=True).encode(
                     x=alt.X('k:Q', title='@k'),
                     y=alt.Y('Precision:Q', scale=alt.Scale(domain=[0.0, 1.0]), title='Precision'),
                 ),
@@ -1101,7 +1112,7 @@ def eval_results(project):
             ndcg_df = pd.DataFrame({"k": [1, 5, 10],
                                     "NDCG": [project["NDCG"], project["NDCG@5"], project["NDCG@10"]]})
             st.altair_chart(
-                alt.Chart(ndcg_df).mark_line().encode(
+                alt.Chart(ndcg_df).mark_line(point=True).encode(
                     x=alt.X('k:Q', title='@k'),
                     y=alt.Y('NDCG:Q', scale=alt.Scale(domain=[0.0, 1.0]), title='NDCG'),
                 ),
