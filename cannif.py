@@ -344,25 +344,27 @@ def action_modal():
     if action == "Train":
         st.warning("Training is very resource-intensive!", icon=":material/warning:")
 
-def upload_action(project_id, action):
+def upload_action(project_id, action, label=None):
     task_id = f"{action} {project_id}"
+    if not label:
+        label = action
 
     entry = get_process(task_id)
     is_running = bool(entry and entry.get("status") is None)
 
-    action_container = st.container(border=True)
+    action_container = st.container(border=True, width="content")
 
     with action_container:
-        file_col, button_col = st.columns([2, 1], vertical_alignment="center")
+        with st.container(horizontal=True, vertical_alignment="center"):
+            uploaded_file = st.file_uploader(f"{label} file", key=f"{task_id}_file",
+                                        type=["tsv", "csv", "json", "jsonl", "ttl", "nt"],
+                                        label_visibility="collapsed")
 
-        uploaded_file = file_col.file_uploader("**Upload File**", key=f"{task_id}_file",
-                                        type=["tsv", "csv", "json", "jsonl", "ttl", "nt"])
-
-        uploader = button_col.empty()
+            uploader = st.empty()
 
     if is_running:
         # Process is still running — show status in place of the button.
-        uploader.info(f"{action} is running", icon=":material/hourglass:")
+        uploader.info(f"{label} is running", icon=":material/hourglass:")
         return
 
     # Save upload as temporary file
@@ -380,7 +382,8 @@ def upload_action(project_id, action):
     else:
         icon = None
 
-    if uploader.button(action, type="primary", width="stretch", icon=icon):
+    button_type = "secondary" if label.startswith("Re-") else "primary"
+    if uploader.button(label, type=button_type, icon=icon, width=150):
         if not uploaded_file:
             with action_container:
                 st.error("No file uploaded")
@@ -863,15 +866,15 @@ def project_form(project):
             terminate_process('Annif')
             st.rerun()
 
-    elif project.get('is_evaluated'): # already evaluated
-        if not project.get('is_optimized'):
-            upload_action(project.get('project_id'), "Optimize")
-    elif evaluable:
-        if not project.get('is_optimized'):
-            upload_action(project.get('project_id'), "Optimize")
-        upload_action(project.get('project_id'), "Evaluate")
-    elif trainable:
-        upload_action(project.get('project_id'), "Train")
+    elif trainable or evaluable:
+        if trainable:
+            upload_action(project.get('project_id'), "Train",
+                          "Re-Train" if is_trained else "Train")
+        if evaluable:
+            upload_action(project.get('project_id'), "Optimize",
+                          "Re-Optimize" if project.get('is_optimized') else "Optimize")
+            upload_action(project.get('project_id'), "Evaluate",
+                          "Re-Evaluate" if project.get('is_evaluated') else "Evaluate")
 
 def vocab_form(project):
     vocabs = get_vocabs()
@@ -1211,6 +1214,8 @@ def main():
     st.markdown("<style>#cannif { font-family: Jost, sans-serif; }</style>", unsafe_allow_html=True)
     # thicken the subheader/header divider lines (default 2px)
     st.markdown('<style>hr[data-testid="stHeadingDivider"] { height: 4px !important; }</style>', unsafe_allow_html=True)
+    # secondary buttons: half-saturated version of the "nif" blue
+    st.markdown('<style>button[kind="secondary"] { color: #203A60; border-color: #203A60; }</style>', unsafe_allow_html=True)
     st.markdown("# <span style='color:#D80621;'>can</span><span style='color:#003580;'>nif</span>", unsafe_allow_html=True)
 
     if version := get_annif_version():
