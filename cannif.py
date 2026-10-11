@@ -528,7 +528,7 @@ def process_dashboard():
                 col1, col2, col3, col4 = st.columns([1, 1.5, 2, 12])
 
                 with col1:
-                    if st.button('', icon=":material/close:", type="secondary", key=key):
+                    if st.button('', icon=":material/close:", type="primary", key=key):
                         terminate_process(key)
                         st.rerun()
 
@@ -568,7 +568,7 @@ def new_project():
         project_modal()
 
     with st.container(horizontal=True):
-        if st.button("New Project", icon=":material/add_box:"):
+        if st.button("New Project", icon=":material/add_box:", type="primary"):
             st.session_state.project_modal = True
             st.rerun()
 
@@ -610,7 +610,7 @@ def list_projects(projects):
     df["is_optimized"] = df["is_optimized"].apply(lambda x: "✔" if x else "-")
     df["is_evaluated"] = df["is_evaluated"].apply(lambda x: "✔" if x else "-")
 
-    with st.expander(f"**{len(projects)} Projects**", expanded=True, icon=":material/assignment:"):
+    with st.expander(f"**{len(projects)} Projects**", expanded=True, icon=":material/dataset:"):
         st.dataframe(df, hide_index=True, column_config=column_config,
                 column_order=column_order, key="table",
                 selection_mode="single-row", on_select="rerun")
@@ -648,27 +648,6 @@ def project_metrics(df, projects):
 
     with st.expander("**Metrics**", expanded=False, icon=":material/bar_chart:"):
 
-        if has_metrics:
-            eval_df = df.set_index("name").dropna(subset=["F1@5"])
-            eval_df = eval_df.rename(columns={
-                            "Recall_microavg": "Recall",
-                            "false_positive_rate": "FPR",
-                            "false_negative_rate": "FNR"})
-
-            col1, col2, col3 = st.columns(3)
-            with col1:
-                with st.container(border=True):
-                    st.bar_chart(eval_df, sort="-F1@5", stack=False, x_label='',
-                                y=["Precision@1","Precision@3","Precision@5"])
-            with col2:
-                with st.container(border=True):
-                    st.bar_chart(eval_df, sort="-F1@5", stack=False, x_label='',
-                                y=["Recall", "FPR", "FNR"])
-            with col3:
-                with st.container(border=True):
-                    st.bar_chart(eval_df, sort="-F1@5", stack=False, x_label='',
-                                y=["NDCG", "NDCG@5", "NDCG@10"])
-
         if pareto_frames:
             all_pareto = pd.concat(pareto_frames, ignore_index=True)
             # sort by precision within each project so the line follows the front
@@ -685,6 +664,75 @@ def project_metrics(df, projects):
                         tooltip=['Project', 'Precision (doc avg)', 'Recall (doc avg)'],
                     ),
                     width='stretch')
+
+        if has_metrics:
+            eval_df = df.set_index("name").dropna(subset=["F1@5"])
+            eval_df = eval_df.rename(columns={
+                            "Recall_microavg": "Recall",
+                            "false_positive_rate": "FPR",
+                            "false_negative_rate": "FNR"})
+
+            # @k curves for all projects, in the style of the per-project
+            # evaluation charts
+            precision_rows = []
+            ndcg_rows = []
+            for project_id, project in projects.items():
+                if not project.get("is_evaluated"):
+                    continue
+                name = project.get("name") or project_id
+                for k, key in ((1, "Precision@1"), (3, "Precision@3"), (5, "Precision@5")):
+                    if project.get(key) is not None:
+                        precision_rows.append({"Project": name, "k": k, "Precision": project[key]})
+                for k, key in ((1, "NDCG"), (5, "NDCG@5"), (10, "NDCG@10")):
+                    if project.get(key) is not None:
+                        ndcg_rows.append({"Project": name, "k": k, "NDCG": project[key]})
+
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                with st.container(border=True):
+                    # explicit metric order for the bar groups and legend
+                    metric_order = ["Recall", "F1@5", "FPR", "FNR"]
+                    bar_df = eval_df[metric_order].rename_axis("Project").reset_index()
+                    bar_df = bar_df.melt(id_vars="Project", var_name="Metric", value_name="Value")
+                    st.altair_chart(
+                        alt.Chart(bar_df)
+                        .mark_bar()
+                        .encode(
+                            x=alt.X("Project:N", title=None,
+                                    axis=alt.Axis(labelAngle=45, labelLimit=500)),
+                            y=alt.Y("Value:Q", scale=alt.Scale(domain=[0.0, 1.0]), title=None),
+                            color=alt.Color("Metric:N", sort=metric_order,
+                                            legend=alt.Legend(orient="bottom")),
+                            xOffset=alt.XOffset("Metric:N", sort=metric_order),
+                            tooltip=["Project", "Metric", "Value"],
+                        ),
+                        width="stretch")
+            with col2:
+                if precision_rows:
+                    with st.container(border=True):
+                        st.altair_chart(
+                            alt.Chart(pd.DataFrame(precision_rows))
+                            .mark_line(point=True)
+                            .encode(
+                                x=alt.X('k:Q', title='@k'),
+                                y=alt.Y('Precision:Q', scale=alt.Scale(domain=[0.0, 1.0]), title='Precision'),
+                                color=alt.Color('Project:N', legend=alt.Legend(orient='bottom')),
+                                tooltip=['Project', 'k', 'Precision'],
+                            ),
+                            width='stretch')
+            with col3:
+                if ndcg_rows:
+                    with st.container(border=True):
+                        st.altair_chart(
+                            alt.Chart(pd.DataFrame(ndcg_rows))
+                            .mark_line(point=True)
+                            .encode(
+                                x=alt.X('k:Q', title='@k'),
+                                y=alt.Y('NDCG:Q', scale=alt.Scale(domain=[0.0, 1.0]), title='NDCG'),
+                                color=alt.Color('Project:N', legend=alt.Legend(orient='bottom')),
+                                tooltip=['Project', 'k', 'NDCG'],
+                            ),
+                            width='stretch')
 
 def project_details(projects):
     # Get the selected row index (Streamlit stores it in session state)
@@ -719,7 +767,7 @@ def project_details(projects):
 def project_form(project):
     backend = project.get('backend')
     backends = ["dummy", "ensemble", "fasttext", "http", "mllm", "nn_ensemble",
-                "threshold_ensemble", "omikuji", "pav", "stwfsa", "svc", "tfidf",
+                "omikuji", "pav", "stwfsa", "svc", "tfidf",
                 "yake", "laya"]
     backend_index = backends.index(backend) if backend else 0
 
@@ -936,11 +984,24 @@ def backend_form(project, keys):
                 filtered_backend[key] = backend_value
 
         if isinstance(default_value, bool):
-            form_value = st.checkbox(f"{key} :gray-badge[Default: {default_value}]", value=params.get(key))
+            form_value = st.checkbox(f"**{key}** :gray-badge[Default: {default_value}]", value=params.get(key))
+        elif "limit" == key:
+            # clamp saved values to the slider range
+            value = int(filtered_backend.get(key, default_value))
+            form_value = st.slider(f"**{key}** :gray-badge[Default: {default_value}]",
+                                  min_value=1, max_value=100, step=1,
+                                  value=min(max(value, 1), 100))
+        elif "threshold" == key:
+            # clamp and snap saved values to the slider range/step
+            value = float(filtered_backend.get(key, default_value))
+            value = round(min(max(value, 0.0), 1.0) / 0.05)
+            form_value = st.slider(f"**{key}** :gray-badge[Default: {default_value}]",
+                                  min_value=0.0, max_value=1.0, step=0.05,
+                                  value=round(value * 0.05, 2))
         elif isinstance(default_value, (int, float)):
-            form_value = st.number_input(key, value=filtered_backend.get(key), placeholder=default_value)
+            form_value = st.number_input(f"**{key}**", value=filtered_backend.get(key), placeholder=default_value)
         else:
-            form_value = st.text_input(key, value=filtered_backend.get(key), placeholder=default_value)
+            form_value = st.text_input(f"**{key}**", value=filtered_backend.get(key), placeholder=default_value)
 
         if form_value is not None:
             filtered_backend[key] = form_value
@@ -1148,6 +1209,8 @@ def main():
 
     st.markdown('<style>span[class^="st-"] { max-width: 100%; }</style>', unsafe_allow_html=True)
     st.markdown("<style>#cannif { font-family: Jost, sans-serif; }</style>", unsafe_allow_html=True)
+    # thicken the subheader/header divider lines (default 2px)
+    st.markdown('<style>hr[data-testid="stHeadingDivider"] { height: 4px !important; }</style>', unsafe_allow_html=True)
     st.markdown("# <span style='color:#D80621;'>can</span><span style='color:#003580;'>nif</span>", unsafe_allow_html=True)
 
     if version := get_annif_version():
