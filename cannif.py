@@ -671,11 +671,20 @@ def project_metrics(df, projects):
 
         if pareto_frames:
             all_pareto = pd.concat(pareto_frames, ignore_index=True)
+            # sort by precision within each project so the line follows the front
+            all_pareto = all_pareto.sort_values(['Project', 'Precision (doc avg)'])
             with st.container(border=True):
                 st.write("**Recall vs Precision (Pareto)**")
-                st.scatter_chart(all_pareto, x='Precision (doc avg)', y='Recall (doc avg)',
-                                color='Project', x_label='', y_label='',
-                                width='stretch')
+                st.altair_chart(
+                    alt.Chart(all_pareto)
+                    .mark_line(point=True)
+                    .encode(
+                        x=alt.X('Precision (doc avg):Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
+                        y=alt.Y('Recall (doc avg):Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
+                        color=alt.Color('Project:N', legend=alt.Legend(orient='bottom')),
+                        tooltip=['Project', 'Precision (doc avg)', 'Recall (doc avg)'],
+                    ),
+                    width='stretch')
 
 def project_details(projects):
     # Get the selected row index (Streamlit stores it in session state)
@@ -1050,10 +1059,12 @@ def optimize_results(project):
 
             if pareto_scatter_by_limit:
                 all_scatter_limit = pd.concat(pareto_scatter_by_limit, ignore_index=True)
+                # sort by precision within each Limit so the line follows the front
+                all_scatter_limit = all_scatter_limit.sort_values(['Limit', 'Precision (doc avg)'])
                 st.write("**Recall vs Precision (Pareto)**")
                 st.altair_chart(
                     alt.Chart(all_scatter_limit)
-                    .mark_circle(size=100)
+                    .mark_line(point=True)
                     .encode(
                         x=alt.X('Precision (doc avg):Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
                         y=alt.Y('Recall (doc avg):Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
