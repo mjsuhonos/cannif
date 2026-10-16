@@ -627,8 +627,9 @@ def project_metrics(df, projects):
     if df is None or df.empty:
         return
 
-    # gather Pareto fronts from all optimized projects
+    # gather Pareto fronts and threshold sweeps from all optimized projects
     pareto_frames = []
+    sweep_frames = []
     for project_id, project in projects.items():
         if not project.get('is_optimized'):
             continue
@@ -637,11 +638,19 @@ def project_metrics(df, projects):
         if opt_df is None:
             continue
 
+        name = project.get('name') or project_id
+
         pareto_rows = pareto_front_rows(opt_df)
-        if pareto_rows is not None:
-            frame = pareto_rows[['Precision (doc avg)', 'Recall (doc avg)']].copy()
-            frame['Project'] = project.get('name') or project_id
-            pareto_frames.append(frame)
+        frame = pareto_rows[['Precision (doc avg)', 'Recall (doc avg)']].copy()
+        frame['Project'] = name
+        pareto_frames.append(frame)
+
+        # threshold-sweep curves at the limit with the best F1 score
+        best_limit = opt_df.loc[opt_df['F1 score (doc avg)'].idxmax(), 'Limit']
+        sweep = opt_df[opt_df['Limit'] == best_limit]
+        sweep = sweep[['Threshold', 'Precision (doc avg)', 'Recall (doc avg)', 'F1 score (doc avg)']].copy()
+        sweep['Project'] = name
+        sweep_frames.append(sweep)
 
     # if there are metrics or Pareto fronts, show graphs
     has_metrics = df["F1@5"].notna().any()
@@ -651,58 +660,109 @@ def project_metrics(df, projects):
 
     with st.expander("**Metrics**", expanded=False, icon=":material/bar_chart:"):
 
-        if pareto_frames:
-            all_pareto = pd.concat(pareto_frames, ignore_index=True)
-            # sort by precision within each project so the line follows the front
-            all_pareto = all_pareto.sort_values(['Project', 'Precision (doc avg)'])
-            with st.container(border=True):
-                st.write("**Recall vs Precision (Pareto)**")
-                st.altair_chart(
-                    alt.Chart(all_pareto)
-                    .mark_line(point=True)
-                    .encode(
-                        x=alt.X('Precision (doc avg):Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
-                        y=alt.Y('Recall (doc avg):Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
-                        color=alt.Color('Project:N', legend=alt.Legend(orient='bottom')),
-                        tooltip=['Project', 'Precision (doc avg)', 'Recall (doc avg)'],
-                    ),
-                    width='stretch')
+        # optimize results on the left, evaluate metrics on the right,
+        # mirroring the per-project layout
+        col1, col2 = st.columns(2)
 
-        if has_metrics:
-            eval_df = df.set_index("name").dropna(subset=["F1@5"])
-            eval_df = eval_df.rename(columns={
-                            "Recall_microavg": "Recall",
-                            "false_positive_rate": "FPR",
-                            "false_negative_rate": "FNR"})
+        with col1:
+            if pareto_frames:
+                # threshold-sweep curves and the Pareto front, in the layout
+                # of the per-project optimized charts
+                all_sweeps = pd.concat(sweep_frames, ignore_index=True)
+                all_sweeps = all_sweeps.sort_values(['Project', 'Threshold'])
 
-            # @k curves for all projects, in the style of the per-project
-            # evaluation charts
-            precision_rows = []
-            ndcg_rows = []
-            for project_id, project in projects.items():
-                if not project.get("is_evaluated"):
-                    continue
-                name = project.get("name") or project_id
-                for k, key in ((1, "Precision@1"), (3, "Precision@3"), (5, "Precision@5")):
-                    if project.get(key) is not None:
-                        precision_rows.append({"Project": name, "k": k, "Precision": project[key]})
-                for k, key in ((1, "NDCG"), (5, "NDCG@5"), (10, "NDCG@10")):
-                    if project.get(key) is not None:
-                        ndcg_rows.append({"Project": name, "k": k, "NDCG": project[key]})
+                with st.container(border=True):
+                    c1, c2 = st.columns(2)
+                    with c1:
+                        st.write("**Precision**")
+                        st.altair_chart(
+                            alt.Chart(all_sweeps.rename(columns={'Precision (doc avg)': 'Precision'}))
+                            .mark_line(point=True)
+                            .encode(
+                                x=alt.X('Threshold:Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
+                                y=alt.Y('Precision:Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
+                                color=alt.Color('Project:N', legend=None),
+                                tooltip=['Project', 'Threshold', 'Precision'],
+                            ),
+                            width='stretch')
+                    with c2:
+                        st.write("**Recall**")
+                        st.altair_chart(
+                            alt.Chart(all_sweeps.rename(columns={'Recall (doc avg)': 'Recall'}))
+                            .mark_line(point=True)
+                            .encode(
+                                x=alt.X('Threshold:Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
+                                y=alt.Y('Recall:Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
+                                color=alt.Color('Project:N', legend=None),
+                                tooltip=['Project', 'Threshold', 'Recall'],
+                            ),
+                            width='stretch')
 
-            col1, col2, col3 = st.columns(3)
-            with col1:
+                    c3, c4 = st.columns(2)
+                    with c3:
+                        st.write("**F1 score**")
+                        st.altair_chart(
+                            alt.Chart(all_sweeps.rename(columns={'F1 score (doc avg)': 'F1 score'}))
+                            .mark_line(point=True)
+                            .encode(
+                                x=alt.X('Threshold:Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
+                                y=alt.Y('F1 score:Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
+                                color=alt.Color('Project:N', legend=None),
+                                tooltip=['Project', 'Threshold', 'F1 score'],
+                            ),
+                            width='stretch')
+                    with c4:
+                        all_pareto = pd.concat(pareto_frames, ignore_index=True)
+                        # sort by precision within each project so the line follows the front
+                        all_pareto = all_pareto.sort_values(['Project', 'Precision (doc avg)'])
+                        st.write("**Recall vs Precision (Pareto)**")
+                        st.altair_chart(
+                            alt.Chart(all_pareto)
+                            .mark_line(point=True)
+                            .encode(
+                                x=alt.X('Precision (doc avg):Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
+                                y=alt.Y('Recall (doc avg):Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
+                                color=alt.Color('Project:N', legend=None),
+                                tooltip=['Project', 'Precision (doc avg)', 'Recall (doc avg)'],
+                            ),
+                            width='stretch')
+
+        with col2:
+            if has_metrics:
+                eval_df = df.set_index("name").dropna(subset=["F1@5"])
+                eval_df = eval_df.rename(columns={
+                                "Recall_microavg": "Recall",
+                                "false_positive_rate": "FPR",
+                                "false_negative_rate": "FNR"})
+
+                # @k curves for all projects, in the style of the per-project
+                # evaluation charts
+                precision_rows = []
+                ndcg_rows = []
+                for project_id, project in projects.items():
+                    if not project.get("is_evaluated"):
+                        continue
+                    name = project.get("name") or project_id
+                    for k, key in ((1, "Precision@1"), (3, "Precision@3"), (5, "Precision@5")):
+                        if project.get(key) is not None:
+                            precision_rows.append({"Project": name, "k": k, "Precision": project[key]})
+                    for k, key in ((1, "NDCG"), (5, "NDCG@5"), (10, "NDCG@10")):
+                        if project.get(key) is not None:
+                            ndcg_rows.append({"Project": name, "k": k, "NDCG": project[key]})
+
                 with st.container(border=True):
                     # explicit metric order for the bar groups and legend
                     metric_order = ["Recall", "F1@5", "FPR", "FNR"]
                     bar_df = eval_df[metric_order].rename_axis("Project").reset_index()
                     bar_df = bar_df.melt(id_vars="Project", var_name="Metric", value_name="Value")
+                    # sort projects by F1@5, descending
+                    project_order = eval_df["F1@5"].sort_values(ascending=False).index.tolist()
                     st.altair_chart(
                         alt.Chart(bar_df)
                         .mark_bar()
                         .encode(
-                            x=alt.X("Project:N", title=None,
-                                    axis=alt.Axis(labelAngle=45, labelLimit=500)),
+                            x=alt.X("Project:N", title=None, sort=project_order,
+                                    axis=alt.Axis(labels=False)),
                             y=alt.Y("Value:Q", scale=alt.Scale(domain=[0.0, 1.0]), title=None),
                             color=alt.Color("Metric:N", sort=metric_order,
                                             legend=alt.Legend(orient="bottom")),
@@ -710,32 +770,34 @@ def project_metrics(df, projects):
                             tooltip=["Project", "Metric", "Value"],
                         ),
                         width="stretch")
-            with col2:
-                if precision_rows:
-                    with st.container(border=True):
-                        st.altair_chart(
-                            alt.Chart(pd.DataFrame(precision_rows))
-                            .mark_line(point=True)
-                            .encode(
-                                x=alt.X('k:Q', title='@k'),
-                                y=alt.Y('Precision:Q', scale=alt.Scale(domain=[0.0, 1.0]), title='Precision'),
-                                color=alt.Color('Project:N', legend=alt.Legend(orient='bottom')),
-                                tooltip=['Project', 'k', 'Precision'],
-                            ),
-                            width='stretch')
-            with col3:
-                if ndcg_rows:
-                    with st.container(border=True):
-                        st.altair_chart(
-                            alt.Chart(pd.DataFrame(ndcg_rows))
-                            .mark_line(point=True)
-                            .encode(
-                                x=alt.X('k:Q', title='@k'),
-                                y=alt.Y('NDCG:Q', scale=alt.Scale(domain=[0.0, 1.0]), title='NDCG'),
-                                color=alt.Color('Project:N', legend=alt.Legend(orient='bottom')),
-                                tooltip=['Project', 'k', 'NDCG'],
-                            ),
-                            width='stretch')
+
+                col3, col4 = st.columns(2)
+                with col3:
+                    if precision_rows:
+                        with st.container(border=True):
+                            st.altair_chart(
+                                alt.Chart(pd.DataFrame(precision_rows))
+                                .mark_line(point=True)
+                                .encode(
+                                    x=alt.X('k:Q', title='@k'),
+                                    y=alt.Y('Precision:Q', scale=alt.Scale(domain=[0.0, 1.0]), title='Precision'),
+                                    color=alt.Color('Project:N', legend=None),
+                                    tooltip=['Project', 'k', 'Precision'],
+                                ),
+                                width='stretch')
+                with col4:
+                    if ndcg_rows:
+                        with st.container(border=True):
+                            st.altair_chart(
+                                alt.Chart(pd.DataFrame(ndcg_rows))
+                                .mark_line(point=True)
+                                .encode(
+                                    x=alt.X('k:Q', title='@k'),
+                                    y=alt.Y('NDCG:Q', scale=alt.Scale(domain=[0.0, 1.0]), title='NDCG'),
+                                    color=alt.Color('Project:N', legend=None),
+                                    tooltip=['Project', 'k', 'NDCG'],
+                                ),
+                                width='stretch')
 
 def project_details(projects):
     # Get the selected row index (Streamlit stores it in session state)
@@ -1009,13 +1071,6 @@ def backend_form(project, keys):
         if form_value is not None:
             filtered_backend[key] = form_value
 
-    # Common limit and threshold parameters above the parameter container;
-    # Annif backends define a default for limit only, so fall back to 0.0
-    common_params = {"limit": 100, "threshold": 0.0}
-    common_params.update({k: v for k, v in default_params.items() if k in common_params})
-    for key, default_value in common_params.items():
-        param_widget(key, default_value)
-
     with st.container(border=True):
         for key, default_value in default_params.items():
             if key in ("limit", "threshold"):
@@ -1052,6 +1107,13 @@ def backend_form(project, keys):
             st.json(response)
             #save_project(response)
 
+    # Common limit and threshold parameters below the parameter container;
+    # Annif backends define a default for limit only, so fall back to 0.0
+    common_params = {"limit": 100, "threshold": 0.0}
+    common_params.update({k: v for k, v in default_params.items() if k in common_params})
+    for key, default_value in common_params.items():
+        param_widget(key, default_value)
+
 def optimize_results(project):
     if not project.get('is_optimized'):
         return
@@ -1065,7 +1127,7 @@ def optimize_results(project):
         return
     
     # Check if we have the required columns
-    required_columns = ['Limit', 'Threshold', 'Precision (doc avg)', 'Recall (doc avg)', 'Pareto front']
+    required_columns = ['Limit', 'Threshold', 'Precision (doc avg)', 'Recall (doc avg)', 'F1 score (doc avg)', 'Pareto front']
     if not all(col in df.columns for col in required_columns):
         st.warning("Required columns for threshold charts not found in data")
         return
@@ -1075,10 +1137,10 @@ def optimize_results(project):
 
     # Precision and Recall lines for each Limit value;
     # long format gives named fields for the hover tooltip
-    chart_df = df[['Threshold', 'Limit', 'Precision (doc avg)', 'Recall (doc avg)']].copy()
+    chart_df = df[['Threshold', 'Limit', 'Precision (doc avg)', 'Recall (doc avg)', 'F1 score (doc avg)']].copy()
     chart_df['Limit'] = chart_df['Limit'].astype(str)
 
-    with st.container(border=True):
+    with st.container():
         # Create columns for Precision/Threshold and Recall/Threshold
         col1, col2 = st.columns(2)
 
@@ -1090,7 +1152,7 @@ def optimize_results(project):
                 .encode(
                     x=alt.X('Threshold:Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
                     y=alt.Y('Precision:Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
-                    color=alt.Color('Limit:N', legend=alt.Legend(orient='bottom')),
+                    color=alt.Color('Limit:N', legend=None),
                     tooltip=['Threshold', 'Limit', 'Precision'],
                 ),
                 width='stretch')
@@ -1103,39 +1165,55 @@ def optimize_results(project):
                 .encode(
                     x=alt.X('Threshold:Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
                     y=alt.Y('Recall:Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
-                    color=alt.Color('Limit:N', legend=alt.Legend(orient='bottom')),
+                    color=alt.Color('Limit:N', legend=None),
                     tooltip=['Threshold', 'Limit', 'Recall'],
                 ),
                 width='stretch')
 
-    with st.container(border=True):
-        # Pareto front in a new row below
+    with st.container():
+        # F1 score alongside the Pareto front, matching the row above
         pareto_rows = pareto_front_rows(df)
-        if pareto_rows is not None:
-            # Pareto front scatter chart (Recall vs Precision) - grouped by Limit
-            pareto_scatter_by_limit = []
-            for limit in limit_values:
-                limit_pareto = pareto_rows[pareto_rows['Limit'] == limit]
-                if len(limit_pareto) > 0:
-                    scatter_data = limit_pareto[['Precision (doc avg)', 'Recall (doc avg)']].copy()
-                    scatter_data['Limit'] = str(limit)
-                    pareto_scatter_by_limit.append(scatter_data)
+        col1, col2 = st.columns(2)
 
-            if pareto_scatter_by_limit:
-                all_scatter_limit = pd.concat(pareto_scatter_by_limit, ignore_index=True)
-                # sort by precision within each Limit so the line follows the front
-                all_scatter_limit = all_scatter_limit.sort_values(['Limit', 'Precision (doc avg)'])
-                st.write("**Recall vs Precision (Pareto)**")
-                st.altair_chart(
-                    alt.Chart(all_scatter_limit)
-                    .mark_line(point=True)
-                    .encode(
-                        x=alt.X('Precision (doc avg):Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
-                        y=alt.Y('Recall (doc avg):Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
-                        color=alt.Color('Limit:N', legend=alt.Legend(orient='bottom')),
-                        tooltip=['Limit', 'Precision (doc avg)', 'Recall (doc avg)'],
-                    ),
-                    width='stretch')
+        with col1:
+            st.write("**F1 score**")
+            st.altair_chart(
+                alt.Chart(chart_df.rename(columns={'F1 score (doc avg)': 'F1 score'}))
+                .mark_line(point=True)
+                .encode(
+                    x=alt.X('Threshold:Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
+                    y=alt.Y('F1 score:Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
+                    color=alt.Color('Limit:N', legend=None),
+                    tooltip=['Threshold', 'Limit', 'F1 score'],
+                ),
+                width='stretch')
+
+        with col2:
+            if pareto_rows is not None:
+                # Pareto front scatter chart (Recall vs Precision) - grouped by Limit
+                pareto_scatter_by_limit = []
+                for limit in limit_values:
+                    limit_pareto = pareto_rows[pareto_rows['Limit'] == limit]
+                    if len(limit_pareto) > 0:
+                        scatter_data = limit_pareto[['Precision (doc avg)', 'Recall (doc avg)']].copy()
+                        scatter_data['Limit'] = str(limit)
+                        pareto_scatter_by_limit.append(scatter_data)
+
+                if pareto_scatter_by_limit:
+                    all_scatter_limit = pd.concat(pareto_scatter_by_limit, ignore_index=True)
+                    # sort by precision within each Limit so the line follows the front
+                    all_scatter_limit = all_scatter_limit.sort_values(['Limit', 'Precision (doc avg)'])
+                    st.write("**Recall vs Precision (Pareto)**")
+                    st.altair_chart(
+                        alt.Chart(all_scatter_limit)
+                        .mark_line(point=True)
+                        .encode(
+                            x=alt.X('Precision (doc avg):Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
+                            y=alt.Y('Recall (doc avg):Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
+                            color=alt.Color('Limit:N', legend=None),
+                            tooltip=['Limit', 'Precision (doc avg)', 'Recall (doc avg)'],
+                        ),
+                        width='stretch')
 
 
 def eval_results(project):
@@ -1165,10 +1243,10 @@ def eval_results(project):
                 rows.append({"Metric": metric, "Type": label, "Value": val})
                 break
 
-    with st.container(border=True):
+    with st.container():
         st.progress(project["F1@5"], text=f"F1@5 = {project['F1@5']:.4f}")
 
-    with st.container(border=True):
+    with st.container():
         if rows:
             df = pd.DataFrame(rows)
 
