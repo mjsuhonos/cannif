@@ -630,6 +630,7 @@ def project_metrics(df, projects):
     # gather Pareto fronts and threshold sweeps from all optimized projects
     pareto_frames = []
     pareto_optima_frames = []
+    current_frames = []
     sweep_frames = []
     for project_id, project in projects.items():
         if not project.get('is_optimized'):
@@ -656,6 +657,24 @@ def project_metrics(df, projects):
         optima['Project'] = name
         pareto_optima_frames.append(optima)
 
+        # current settings: live slider values for the selected project,
+        # saved configuration otherwise; matched to the nearest sweep row
+        params = project.get('backend_params') or {}
+        defaults = project.get('default_params') or {}
+        current_limit = st.session_state.get(f"limit_{project_id}",
+                                             params.get('limit', defaults.get('limit', 100)))
+        current_threshold = st.session_state.get(f"threshold_{project_id}",
+                                                 params.get('threshold', defaults.get('threshold', 0.0)))
+        current_limit = min(max(int(current_limit), 1), 100)
+        current_threshold = round(min(max(float(current_threshold), 0.0), 1.0) / 0.05) * 0.05
+        limit_rows = opt_df[opt_df['Limit'] == current_limit]
+        if limit_rows.empty:
+            limit_rows = opt_df[opt_df['Limit'] == opt_df.loc[opt_df['Limit'].sub(current_limit).abs().idxmin(), 'Limit']]
+        current = limit_rows.iloc[[(limit_rows['Threshold'] - current_threshold).abs().argmin()]]
+        current = current[['Precision (doc avg)', 'Recall (doc avg)', 'Limit', 'Threshold']].copy()
+        current['Project'] = name
+        current_frames.append(current)
+
         # threshold-sweep curves at the limit with the best F1 score
         sweep = opt_df[opt_df['Limit'] == best_limit]
         sweep = sweep[['Threshold', 'Limit', 'Precision (doc avg)', 'Recall (doc avg)', 'F1 score (doc avg)']].copy()
@@ -680,6 +699,7 @@ def project_metrics(df, projects):
                 # of the per-project optimized charts
                 all_sweeps = pd.concat(sweep_frames, ignore_index=True)
                 all_sweeps = all_sweeps.sort_values(['Project', 'Threshold'])
+                all_current = pd.concat(current_frames, ignore_index=True)
                 # flag each project's optimum (best F1 score) configuration
                 best = all_sweeps.groupby('Project')['F1 score (doc avg)'].idxmax()
                 all_sweeps['Optimum'] = False
@@ -744,7 +764,14 @@ def project_metrics(df, projects):
                                 y=alt.Y('Recall (doc avg):Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
                                 color=alt.Color('Project:N', legend=None),
                                 tooltip=['Project', 'Limit', 'Threshold',
-                                         'Precision (doc avg)', 'Recall (doc avg)']),
+                                         'Precision (doc avg)', 'Recall (doc avg)'],
+                            )
+                            + alt.Chart(all_current).mark_circle(size=60, color='#FF4B4B').encode(
+                                x=alt.X('Precision (doc avg):Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
+                                y=alt.Y('Recall (doc avg):Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
+                                tooltip=['Project', 'Limit', 'Threshold',
+                                         'Precision (doc avg)', 'Recall (doc avg)'],
+                            ),
                             width='stretch')
 
         with col2:
@@ -1100,14 +1127,16 @@ def backend_form(project, keys):
             value = int(filtered_backend.get(key, default_value))
             form_value = st.slider(f"**{key}** :gray-badge[Default: {default_value}]",
                                   min_value=1, max_value=100, step=1,
-                                  value=min(max(value, 1), 100))
+                                  value=min(max(value, 1), 100),
+                                  key=f"limit_{project.get('project_id')}")
         elif "threshold" == key:
             # clamp and snap saved values to the slider range/step
             value = float(filtered_backend.get(key, default_value))
             value = round(min(max(value, 0.0), 1.0) / 0.05)
             form_value = st.slider(f"**{key}** :gray-badge[Default: {default_value}]",
                                   min_value=0.0, max_value=1.0, step=0.05,
-                                  value=round(value * 0.05, 2))
+                                  value=round(value * 0.05, 2),
+                                  key=f"threshold_{project.get('project_id')}")
         elif isinstance(default_value, (int, float)):
             form_value = st.number_input(f"**{key}**", value=filtered_backend.get(key), placeholder=default_value)
         else:
@@ -1147,17 +1176,17 @@ def backend_form(project, keys):
             new_sources = st.multiselect("Sources", keys, source_list)
             response['backend']['params']['sources'] = ",".join(new_sources)
 
-        if st.button("Save Configuration", type="primary"):
-            st.json(project)
-            st.json(response)
-            #save_project(response)
-
     # Common limit and threshold parameters below the parameter container;
     # Annif backends define a default for limit only, so fall back to 0.0
     common_params = {"limit": 100, "threshold": 0.0}
     common_params.update({k: v for k, v in default_params.items() if k in common_params})
     for key, default_value in common_params.items():
         param_widget(key, default_value)
+
+    if st.button("Save Configuration", type="primary"):
+        st.json(project)
+        st.json(response)
+        #save_project(response)
 
 def optimize_results(project):
     if not project.get('is_optimized'):
@@ -1185,6 +1214,28 @@ def optimize_results(project):
     chart_df = df[['Threshold', 'Limit', 'Precision (doc avg)', 'Recall (doc avg)', 'F1 score (doc avg)']].copy()
     chart_df['Limit'] = chart_df['Limit'].astype(str)
 
+    # the backend sliders' live values (falling back to the saved
+    # configuration), clamped and snapped like the sliders, then matched to
+    # the nearest sweep row; marked with a red dot on the charts
+    project_id = project['project_id']
+    params = project.get('backend_params') or {}
+    defaults = project.get('default_params') or {}
+    current_limit = st.session_state.get(f"limit_{project_id}",
+                                         params.get('limit', defaults.get('limit', 100)))
+    current_threshold = st.session_state.get(f"threshold_{project_id}",
+                                             params.get('threshold', defaults.get('threshold', 0.0)))
+    current_limit = min(max(int(current_limit), 1), 100)
+    current_threshold = round(min(max(float(current_threshold), 0.0), 1.0) / 0.05) * 0.05
+
+    limit_rows = df[df['Limit'] == current_limit]
+    if limit_rows.empty:
+        limit_rows = df[df['Limit'] == df.loc[df['Limit'].sub(current_limit).abs().idxmin(), 'Limit']]
+    current = limit_rows.iloc[[(limit_rows['Threshold'] - current_threshold).abs().argmin()]]
+
+    # the sweep's optimal point (best F1 score), enlarged on the charts
+    optimum = df.loc[[df['F1 score (doc avg)'].idxmax()]].copy()
+    optimum['Limit'] = optimum['Limit'].astype(str)
+
     with st.container():
         # Create columns for Precision/Threshold and Recall/Threshold
         col1, col2 = st.columns(2)
@@ -1199,6 +1250,21 @@ def optimize_results(project):
                     y=alt.Y('Precision:Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
                     color=alt.Color('Limit:N', legend=None),
                     tooltip=['Limit', 'Threshold', 'Precision'],
+                )
+                + alt.Chart(optimum.rename(columns={'Precision (doc avg)': 'Precision'}))
+                .mark_circle(size=100)
+                .encode(
+                    x=alt.X('Threshold:Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
+                    y=alt.Y('Precision:Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
+                    color=alt.Color('Limit:N', legend=None),
+                    tooltip=['Limit', 'Threshold', 'Precision'],
+                )
+                + alt.Chart(current.rename(columns={'Precision (doc avg)': 'Precision'}))
+                .mark_circle(size=100, color='#FF4B4B')
+                .encode(
+                    x=alt.X('Threshold:Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
+                    y=alt.Y('Precision:Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
+                    tooltip=['Limit', 'Threshold', 'Precision'],
                 ),
                 width='stretch')
 
@@ -1211,6 +1277,21 @@ def optimize_results(project):
                     x=alt.X('Threshold:Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
                     y=alt.Y('Recall:Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
                     color=alt.Color('Limit:N', legend=None),
+                    tooltip=['Limit', 'Threshold', 'Recall'],
+                )
+                + alt.Chart(optimum.rename(columns={'Recall (doc avg)': 'Recall'}))
+                .mark_circle(size=100)
+                .encode(
+                    x=alt.X('Threshold:Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
+                    y=alt.Y('Recall:Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
+                    color=alt.Color('Limit:N', legend=None),
+                    tooltip=['Limit', 'Threshold', 'Recall'],
+                )
+                + alt.Chart(current.rename(columns={'Recall (doc avg)': 'Recall'}))
+                .mark_circle(size=100, color='#FF4B4B')
+                .encode(
+                    x=alt.X('Threshold:Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
+                    y=alt.Y('Recall:Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
                     tooltip=['Limit', 'Threshold', 'Recall'],
                 ),
                 width='stretch')
@@ -1229,6 +1310,21 @@ def optimize_results(project):
                     x=alt.X('Threshold:Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
                     y=alt.Y('F1 score:Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
                     color=alt.Color('Limit:N', legend=None),
+                    tooltip=['Limit', 'Threshold', 'F1 score'],
+                )
+                + alt.Chart(optimum.rename(columns={'F1 score (doc avg)': 'F1 score'}))
+                .mark_circle(size=100)
+                .encode(
+                    x=alt.X('Threshold:Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
+                    y=alt.Y('F1 score:Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
+                    color=alt.Color('Limit:N', legend=None),
+                    tooltip=['Limit', 'Threshold', 'F1 score'],
+                )
+                + alt.Chart(current.rename(columns={'F1 score (doc avg)': 'F1 score'}))
+                .mark_circle(size=100, color='#FF4B4B')
+                .encode(
+                    x=alt.X('Threshold:Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
+                    y=alt.Y('F1 score:Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
                     tooltip=['Limit', 'Threshold', 'F1 score'],
                 ),
                 width='stretch')
@@ -1249,13 +1345,33 @@ def optimize_results(project):
                     # sort by precision within each Limit so the line follows the front
                     all_scatter_limit = all_scatter_limit.sort_values(['Limit', 'Precision (doc avg)'])
                     st.write("**Recall vs Precision (Pareto)**")
+                    # grey background points: every sweep combination in
+                    # recall-vs-precision space, behind the colored front
                     st.altair_chart(
-                        alt.Chart(all_scatter_limit)
+                        alt.Chart(chart_df)
+                        .mark_circle(size=20, opacity=0.35, color='gray')
+                        .encode(
+                            x=alt.X('Precision (doc avg):Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
+                            y=alt.Y('Recall (doc avg):Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
+                            tooltip=['Limit', 'Threshold', 'Precision (doc avg)', 'Recall (doc avg)'],
+                        )
+                        + alt.Chart(all_scatter_limit)
                         .mark_line(point=True)
                         .encode(
                             x=alt.X('Precision (doc avg):Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
                             y=alt.Y('Recall (doc avg):Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
                             color=alt.Color('Limit:N', legend=None),
+                            tooltip=['Limit', 'Threshold', 'Precision (doc avg)', 'Recall (doc avg)'],
+                        )
+                        + alt.Chart(optimum).mark_circle(size=100).encode(
+                            x=alt.X('Precision (doc avg):Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
+                            y=alt.Y('Recall (doc avg):Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
+                            color=alt.Color('Limit:N', legend=None),
+                            tooltip=['Limit', 'Threshold', 'Precision (doc avg)', 'Recall (doc avg)'],
+                        )
+                        + alt.Chart(current).mark_circle(size=100, color='#FF4B4B').encode(
+                            x=alt.X('Precision (doc avg):Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
+                            y=alt.Y('Recall (doc avg):Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
                             tooltip=['Limit', 'Threshold', 'Precision (doc avg)', 'Recall (doc avg)'],
                         ),
                         width='stretch')
