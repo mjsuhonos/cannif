@@ -706,6 +706,35 @@ def project_metrics(df, projects):
                 all_sweeps.loc[best, 'Optimum'] = True
 
                 with st.container():
+                    all_optima = pd.concat(pareto_optima_frames, ignore_index=True)
+                    # thin grey lines link each project's current settings
+                    # to its best (highest F1 score) point
+                    cur_pts = all_current[['Project', 'Precision (doc avg)', 'Recall (doc avg)']]
+                    best_pts = all_sweeps[all_sweeps['Optimum']][['Project', 'Precision (doc avg)', 'Recall (doc avg)']]
+                    links = pd.concat([cur_pts, best_pts], ignore_index=True)
+                    st.write("**Recall vs Precision (Pareto)**")
+                    st.altair_chart(
+                        alt.Chart(links).mark_line(strokeWidth=1, opacity=0.5, color='gray').encode(
+                            x=alt.X('Precision (doc avg):Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
+                            y=alt.Y('Recall (doc avg):Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
+                            detail='Project:N',
+                            tooltip=['Project'],
+                        )
+                        + alt.Chart(all_optima).mark_circle(size=40).encode(
+                            x=alt.X('Precision (doc avg):Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
+                            y=alt.Y('Recall (doc avg):Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
+                            color=alt.Color('Project:N', legend=None),
+                            tooltip=['Project', 'Limit', 'Threshold',
+                                     'Precision (doc avg)', 'Recall (doc avg)'],
+                        )
+                        + alt.Chart(all_current).mark_circle(size=60, color='#FF4B4B').encode(
+                            x=alt.X('Precision (doc avg):Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
+                            y=alt.Y('Recall (doc avg):Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
+                            tooltip=['Project', 'Limit', 'Threshold',
+                                     'Precision (doc avg)', 'Recall (doc avg)'],
+                        ),
+                        width='stretch')
+
                     c1, c2 = st.columns(2)
                     with c1:
                         st.write("**Precision**")
@@ -732,7 +761,7 @@ def project_metrics(df, projects):
                             + base.mark_circle(size=60).transform_filter(alt.datum.Optimum),
                             width='stretch')
 
-                    c3, c4 = st.columns(2)
+                    c3, _ = st.columns(2)
                     with c3:
                         st.write("**F1 score**")
                         base = alt.Chart(all_sweeps.rename(columns={'F1 score (doc avg)': 'F1 score'})).encode(
@@ -744,34 +773,6 @@ def project_metrics(df, projects):
                         st.altair_chart(
                             base.mark_line(strokeWidth=1, opacity=0.75)
                             + base.mark_circle(size=60).transform_filter(alt.datum.Optimum),
-                            width='stretch')
-                    with c4:
-                        all_pareto = pd.concat(pareto_frames, ignore_index=True)
-                        # sort by precision within each project so the line follows the front
-                        all_pareto = all_pareto.sort_values(['Project', 'Precision (doc avg)'])
-                        all_optima = pd.concat(pareto_optima_frames, ignore_index=True)
-                        st.write("**Recall vs Precision (Pareto)**")
-                        st.altair_chart(
-                            alt.Chart(all_pareto).mark_line(strokeWidth=1, opacity=0.75).encode(
-                                x=alt.X('Precision (doc avg):Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
-                                y=alt.Y('Recall (doc avg):Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
-                                color=alt.Color('Project:N', legend=None),
-                                tooltip=['Project', 'Limit', 'Threshold',
-                                         'Precision (doc avg)', 'Recall (doc avg)'],
-                            )
-                            + alt.Chart(all_optima).mark_circle(size=40).encode(
-                                x=alt.X('Precision (doc avg):Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
-                                y=alt.Y('Recall (doc avg):Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
-                                color=alt.Color('Project:N', legend=None),
-                                tooltip=['Project', 'Limit', 'Threshold',
-                                         'Precision (doc avg)', 'Recall (doc avg)'],
-                            )
-                            + alt.Chart(all_current).mark_circle(size=60, color='#FF4B4B').encode(
-                                x=alt.X('Precision (doc avg):Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
-                                y=alt.Y('Recall (doc avg):Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
-                                tooltip=['Project', 'Limit', 'Threshold',
-                                         'Precision (doc avg)', 'Recall (doc avg)'],
-                            ),
                             width='stretch')
 
         with col2:
@@ -820,7 +821,7 @@ def project_metrics(df, projects):
                     rate_df = pd.DataFrame(list(rates.values()))
 
                     with st.container():
-                        st.write("**Recall vs Precision**")
+                        st.write("**Recall vs Precision (Averages)**")
                         # thin gray lines link each project's three
                         # averaging-type values together
                         links = alt.Chart(rate_df.sort_values(['Project', 'Type'])).mark_line(
@@ -843,12 +844,13 @@ def project_metrics(df, projects):
                 with col3:
                     if precision_rows:
                         with st.container():
+                            st.write("**Precision @K**")
                             st.altair_chart(
                                 alt.Chart(pd.DataFrame(precision_rows))
                                 .mark_line(strokeWidth=1, opacity=0.75, point={"filled": True, "size": 40})
                                 .encode(
-                                    x=alt.X('k:Q', title='@k'),
-                                    y=alt.Y('Precision:Q', scale=alt.Scale(domain=[0.0, 1.0]), title='Precision'),
+                                    x=alt.X('k:Q', title=None),
+                                    y=alt.Y('Precision:Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
                                     color=alt.Color('Project:N', legend=None),
                                     tooltip=['Project', 'k', 'Precision'],
                                 ),
@@ -856,12 +858,13 @@ def project_metrics(df, projects):
                 with col4:
                     if ndcg_rows:
                         with st.container():
+                            st.write("**NDCG @K**")
                             st.altair_chart(
                                 alt.Chart(pd.DataFrame(ndcg_rows))
                                 .mark_line(strokeWidth=1, opacity=0.75, point={"filled": True, "size": 40})
                                 .encode(
-                                    x=alt.X('k:Q', title='@k'),
-                                    y=alt.Y('NDCG:Q', scale=alt.Scale(domain=[0.0, 1.0]), title='NDCG'),
+                                    x=alt.X('k:Q', title=None),
+                                    y=alt.Y('NDCG:Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
                                     color=alt.Color('Project:N', legend=None),
                                     tooltip=['Project', 'k', 'NDCG'],
                                 ),
