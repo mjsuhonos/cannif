@@ -627,6 +627,14 @@ def project_metrics(df, projects):
     if df is None or df.empty:
         return
 
+    # project filter for this expander, driven by the pills widget below.
+    # Reading the widget's session state makes the selection known before
+    # the chart data is assembled. Defaults to all projects; an empty
+    # selection also falls back to all.
+    all_names = [p.get("name") or pid for pid, p in projects.items()]
+    selected = st.session_state.get("metric_projects")
+    selected_names = set(selected) if selected else set(all_names)
+
     # gather Pareto fronts and threshold sweeps from all optimized projects
     pareto_frames = []
     pareto_optima_frames = []
@@ -696,6 +704,32 @@ def project_metrics(df, projects):
 
     with st.expander("**Metrics**", expanded=False, icon=":material/bar_chart:"):
 
+        st.pills("Projects", all_names, selection_mode="multi",
+                 label_visibility="collapsed", key="metric_projects",
+                 help="Showing all projects. Select specific projects to filter the charts.")
+
+        # the selection is applied inside the expander so it (and the pills
+        # widget) always render even when the selected projects have no
+        # data; skipping the widget would clear its session state
+        if selected_names != set(all_names):
+            df = df[df["name"].isin(selected_names)]
+            projects = {pid: p for pid, p in projects.items()
+                        if (p.get("name") or pid) in selected_names}
+
+            def selected_rows(frames):
+                return [frame[frame["Project"].isin(selected_names)] for frame in frames]
+
+            sweep_frames = selected_rows(sweep_frames)
+            current_frames = selected_rows(current_frames)
+            pareto_frames = selected_rows(pareto_frames)
+            pareto_optima_frames = selected_rows(pareto_optima_frames)
+            best_frames = selected_rows(best_frames)
+
+        # recompute the per-chart gates on the filtered data; the expander
+        # itself stays gated on the unfiltered data above
+        has_metrics = df["F1@5"].notna().any()
+        has_optimized = any(not frame.empty for frame in pareto_frames)
+
         # full-width comparison of the headline table metrics; project
         # identity rides along in the hover, not on the axis or a legend
         if has_metrics:
@@ -715,7 +749,8 @@ def project_metrics(df, projects):
             st.write("**Metric comparison**")
             st.altair_chart(
                 alt.Chart(bar_df).mark_bar().encode(
-                    x=alt.X('Metric:N', sort=list(metric_cols.values()), title=None),
+                    x=alt.X('Metric:N', sort=list(metric_cols.values()), title=None,
+                            axis=alt.Axis(labelAngle=0)),
                     y=alt.Y('Value:Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
                     color=alt.Color('Project:N', legend=None, sort=project_order),
                     xOffset=alt.XOffset('Project:N', sort=project_order),
@@ -728,7 +763,7 @@ def project_metrics(df, projects):
         col1, col2 = st.columns(2)
 
         with col1:
-            if pareto_frames:
+            if has_optimized:
                 # threshold-sweep curves and the Pareto front, in the layout
                 # of the per-project optimized charts
                 all_sweeps = pd.concat(sweep_frames, ignore_index=True)
