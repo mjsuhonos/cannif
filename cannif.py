@@ -696,6 +696,30 @@ def project_metrics(df, projects):
 
     with st.expander("**Metrics**", expanded=False, icon=":material/bar_chart:"):
 
+        # full-width comparison of the headline table metrics; project
+        # identity rides along in the hover, not on the axis or a legend
+        if has_metrics:
+            metric_cols = {"F1@5": "F1@5",
+                           "Precision@1": "Precision@1",
+                           "Precision@3": "Precision@3",
+                           "Precision@5": "Precision@5",
+                           "Recall_microavg": "Recall",
+                           "false_positive_rate": "FPR",
+                           "false_negative_rate": "FNR"}
+            bar_df = df.rename(columns=metric_cols)[["name"] + list(metric_cols.values())]
+            bar_df = bar_df.melt(id_vars="name", var_name="Metric", value_name="Value")
+            bar_df = bar_df.rename(columns={"name": "Project"})
+            st.write("**Metric comparison**")
+            st.altair_chart(
+                alt.Chart(bar_df).mark_bar().encode(
+                    x=alt.X('Metric:N', sort=list(metric_cols.values()), title=None),
+                    y=alt.Y('Value:Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
+                    color=alt.Color('Project:N', legend=None),
+                    xOffset='Project:N',
+                    tooltip=['Project', 'Metric', 'Value'],
+                ),
+                width='stretch')
+
         # optimize results on the left, evaluate metrics on the right,
         # mirroring the per-project layout
         col1, col2 = st.columns(2)
