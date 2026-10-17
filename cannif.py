@@ -488,8 +488,6 @@ def process_usage(entry):
 def task_watcher():
     # Poll background tasks on a timer; when one finishes, trigger a full
     # rerun so statuses, flags and result containers refresh automatically
-    st.empty()
-
     with process_registry["lock"]:
         keys = list(process_registry["processes"].keys())
 
@@ -613,7 +611,7 @@ def list_projects(projects):
     df["is_optimized"] = df["is_optimized"].apply(lambda x: "✔" if x else "-")
     df["is_evaluated"] = df["is_evaluated"].apply(lambda x: "✔" if x else "-")
 
-    with st.expander(f"**{len(projects)} Projects**", expanded=True, icon=":material/dataset:"):
+    with st.expander(f"**{len(projects)} Projects**", expanded=False, icon=":material/dataset:"):
         st.dataframe(df, hide_index=True, column_config=column_config,
                 column_order=column_order, key="table",
                 selection_mode="single-row", on_select="rerun")
@@ -630,8 +628,13 @@ def project_metrics(df, projects):
     # project filter for this expander, driven by the pills widget below.
     # Reading the widget's session state makes the selection known before
     # the chart data is assembled. Defaults to all projects; an empty
-    # selection also falls back to all.
-    all_names = [p.get("name") or pid for pid, p in projects.items()]
+    # selection also falls back to all. Options follow the graphs' order:
+    # F1@5 descending, unevaluated projects last.
+    all_names = [p.get("name") or pid for pid, p in
+                sorted(projects.items(),
+                       key=lambda kv: (kv[1].get("F1@5") is not None,
+                                       kv[1].get("F1@5") or 0.0),
+                       reverse=True)]
     selected = st.session_state.get("metric_projects")
     selected_names = set(selected) if selected else set(all_names)
 
