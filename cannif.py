@@ -707,6 +707,9 @@ def project_metrics(df, projects):
                            "false_positive_rate": "FPR",
                            "false_negative_rate": "FNR"}
             bar_df = df.rename(columns=metric_cols)[["name"] + list(metric_cols.values())]
+            # projects ordered by F1@5, best first; unevaluated
+            # projects sink to the end of each metric's bars
+            project_order = df.sort_values("F1@5", ascending=False, kind="stable")["name"].tolist()
             bar_df = bar_df.melt(id_vars="name", var_name="Metric", value_name="Value")
             bar_df = bar_df.rename(columns={"name": "Project"})
             st.write("**Metric comparison**")
@@ -714,8 +717,8 @@ def project_metrics(df, projects):
                 alt.Chart(bar_df).mark_bar().encode(
                     x=alt.X('Metric:N', sort=list(metric_cols.values()), title=None),
                     y=alt.Y('Value:Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
-                    color=alt.Color('Project:N', legend=None),
-                    xOffset='Project:N',
+                    color=alt.Color('Project:N', legend=None, sort=project_order),
+                    xOffset=alt.XOffset('Project:N', sort=project_order),
                     tooltip=['Project', 'Metric', 'Value'],
                 ),
                 width='stretch')
@@ -963,15 +966,6 @@ def project_form(project):
         value=project.get('transform_spec'), disabled=is_trained
     )
 
-    if modtime := project.get('modification_time'):
-        try:
-            from datetime import datetime
-            dt = datetime.fromisoformat(modtime)
-            formatted_time = dt.strftime("%Y-%m-%d %H:%M:%S")
-        except:
-            formatted_time = modtime
-        st.write(f"**Modified:** {formatted_time}")
-
     if project.get('is_new'):
         # TODO: encapsulate into a separate function
         project['backend'] = st.selectbox("**Backend**", backends, index=backend_index)
@@ -1211,10 +1205,22 @@ def backend_form(project, keys, left_col):
             with param_col:
                 param_widget(key, default_value)
 
-        if st.button("Save Configuration", type="primary"):
-            st.json(project)
-            st.json(response)
-            #save_project(response)
+    if modtime := project.get('modification_time'):
+        try:
+            from datetime import datetime
+            dt = datetime.fromisoformat(modtime)
+            formatted_time = dt.strftime("%Y-%m-%d %H:%M:%S")
+        except:
+            formatted_time = modtime
+
+        st.write(f"**Modified:** {formatted_time}")
+
+    # the save button renders in the right column, below the
+    # backend parameter container
+    if st.button("Save Configuration", type="primary"):
+        st.json(project)
+        st.json(response)
+        #save_project(response)
 
 def optimize_results(project):
     if not project.get('is_optimized'):
