@@ -750,20 +750,20 @@ def project_metrics(df, projects):
                         links = pd.concat([cur_pts, best_pts], ignore_index=True)
                         st.write("**Recall vs Precision (Pareto)**")
                         st.altair_chart(
-                            alt.Chart(links).mark_line(strokeWidth=1, opacity=0.5, color='gray').encode(
+                            alt.Chart(links).mark_line(opacity=0.5, color='gray').encode(
                                 x=alt.X('Precision (doc avg):Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
                                 y=alt.Y('Recall (doc avg):Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
                                 detail='Project:N',
                                 tooltip=['Project'],
                             )
-                            + alt.Chart(all_optima).mark_circle(size=60, opacity=1).encode(
+                            + alt.Chart(all_optima).mark_circle(size=120, opacity=1).encode(
                                 x=alt.X('Precision (doc avg):Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
                                 y=alt.Y('Recall (doc avg):Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
                                 color=alt.Color('Project:N', legend=None),
                                 tooltip=['Project', 'Limit', 'Threshold',
                                          'Precision (doc avg)', 'Recall (doc avg)'],
                             )
-                            + alt.Chart(all_current).mark_circle(size=60, opacity=1, color='#FF4B4B').encode(
+                            + alt.Chart(all_current).mark_circle(size=120, opacity=1, color='#FF4B4B').encode(
                                 x=alt.X('Precision (doc avg):Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
                                 y=alt.Y('Recall (doc avg):Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
                                 tooltip=['Project', 'Limit', 'Threshold',
@@ -851,7 +851,7 @@ def project_metrics(df, projects):
                         # thin gray lines link each project's three
                         # averaging-type values together
                         links = alt.Chart(rate_df.sort_values(['Project', 'Type'])).mark_line(
-                                        strokeWidth=1, opacity=0.5, color='gray').encode(
+                                        opacity=0.5, color='gray').encode(
                             x=alt.X('Precision:Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
                             y=alt.Y('Recall:Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
                             detail='Project:N',
@@ -1279,13 +1279,13 @@ def optimize_results(project):
                             color=alt.Color('Limit:N', legend=None),
                             tooltip=['Limit', 'Threshold', 'Precision (doc avg)', 'Recall (doc avg)'],
                         )
-                        + alt.Chart(optimum).mark_circle(size=60, opacity=1).encode(
+                        + alt.Chart(optimum).mark_circle(size=120, opacity=1).encode(
                             x=alt.X('Precision (doc avg):Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
                             y=alt.Y('Recall (doc avg):Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
                             color=alt.Color('Limit:N', legend=None),
                             tooltip=['Limit', 'Threshold', 'Precision (doc avg)', 'Recall (doc avg)'],
                         )
-                        + alt.Chart(current).mark_circle(size=60, opacity=1, color='#FF4B4B').encode(
+                        + alt.Chart(current).mark_circle(size=120, opacity=1, color='#FF4B4B').encode(
                             x=alt.X('Precision (doc avg):Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
                             y=alt.Y('Recall (doc avg):Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
                             tooltip=['Limit', 'Threshold', 'Precision (doc avg)', 'Recall (doc avg)'],
