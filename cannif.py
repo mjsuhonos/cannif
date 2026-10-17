@@ -632,6 +632,7 @@ def project_metrics(df, projects):
     pareto_optima_frames = []
     current_frames = []
     sweep_frames = []
+    best_frames = []
     for project_id, project in projects.items():
         if not project.get('is_optimized'):
             continue
@@ -642,7 +643,7 @@ def project_metrics(df, projects):
 
         name = project.get('name') or project_id
 
-        # the limit with the best F1 score drives the sweep and Pareto views
+        # the limit with the best F1 score drives the Pareto optima view
         best_limit = opt_df.loc[opt_df['F1 score (doc avg)'].idxmax(), 'Limit']
 
         # full Pareto front draws the lines; only the front points at the
@@ -656,6 +657,13 @@ def project_metrics(df, projects):
         optima = optima[['Precision (doc avg)', 'Recall (doc avg)', 'Limit', 'Threshold']].copy()
         optima['Project'] = name
         pareto_optima_frames.append(optima)
+
+        # the project's overall best (highest F1 score) configuration;
+        # endpoint of the grey link to its current settings
+        best = opt_df.loc[[opt_df['F1 score (doc avg)'].idxmax()],
+                          ['Precision (doc avg)', 'Recall (doc avg)', 'Limit', 'Threshold']].copy()
+        best['Project'] = name
+        best_frames.append(best)
 
         # current settings: live slider values for the selected project,
         # saved configuration otherwise; matched to the nearest sweep row
@@ -675,9 +683,8 @@ def project_metrics(df, projects):
         current['Project'] = name
         current_frames.append(current)
 
-        # threshold-sweep curves at the limit with the best F1 score
-        sweep = opt_df[opt_df['Limit'] == best_limit]
-        sweep = sweep[['Threshold', 'Limit', 'Precision (doc avg)', 'Recall (doc avg)', 'F1 score (doc avg)']].copy()
+        # threshold-sweep curves at the currently selected limit
+        sweep = limit_rows[['Threshold', 'Limit', 'Precision (doc avg)', 'Recall (doc avg)', 'F1 score (doc avg)']].copy()
         sweep['Project'] = name
         sweep_frames.append(sweep)
 
@@ -700,41 +707,13 @@ def project_metrics(df, projects):
                 all_sweeps = pd.concat(sweep_frames, ignore_index=True)
                 all_sweeps = all_sweeps.sort_values(['Project', 'Threshold'])
                 all_current = pd.concat(current_frames, ignore_index=True)
-                # flag each project's optimum (best F1 score) configuration
+                # flag the best (highest F1 score) point within each
+                # selected-limit sweep; drawn as dots on the small charts
                 best = all_sweeps.groupby('Project')['F1 score (doc avg)'].idxmax()
                 all_sweeps['Optimum'] = False
                 all_sweeps.loc[best, 'Optimum'] = True
 
                 with st.container():
-                    all_optima = pd.concat(pareto_optima_frames, ignore_index=True)
-                    # thin grey lines link each project's current settings
-                    # to its best (highest F1 score) point
-                    cur_pts = all_current[['Project', 'Precision (doc avg)', 'Recall (doc avg)']]
-                    best_pts = all_sweeps[all_sweeps['Optimum']][['Project', 'Precision (doc avg)', 'Recall (doc avg)']]
-                    links = pd.concat([cur_pts, best_pts], ignore_index=True)
-                    st.write("**Recall vs Precision (Pareto)**")
-                    st.altair_chart(
-                        alt.Chart(links).mark_line(strokeWidth=1, opacity=0.5, color='gray').encode(
-                            x=alt.X('Precision (doc avg):Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
-                            y=alt.Y('Recall (doc avg):Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
-                            detail='Project:N',
-                            tooltip=['Project'],
-                        )
-                        + alt.Chart(all_optima).mark_circle(size=40).encode(
-                            x=alt.X('Precision (doc avg):Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
-                            y=alt.Y('Recall (doc avg):Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
-                            color=alt.Color('Project:N', legend=None),
-                            tooltip=['Project', 'Limit', 'Threshold',
-                                     'Precision (doc avg)', 'Recall (doc avg)'],
-                        )
-                        + alt.Chart(all_current).mark_circle(size=60, color='#FF4B4B').encode(
-                            x=alt.X('Precision (doc avg):Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
-                            y=alt.Y('Recall (doc avg):Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
-                            tooltip=['Project', 'Limit', 'Threshold',
-                                     'Precision (doc avg)', 'Recall (doc avg)'],
-                        ),
-                        width='stretch')
-
                     c1, c2 = st.columns(2)
                     with c1:
                         st.write("**Precision**")
@@ -745,8 +724,8 @@ def project_metrics(df, projects):
                             tooltip=['Project', 'Limit', 'Threshold', 'Precision'],
                         )
                         st.altair_chart(
-                            base.mark_line(strokeWidth=1, opacity=0.75)
-                            + base.mark_circle(size=60).transform_filter(alt.datum.Optimum),
+                            base.mark_line(point=True)
+                            + base.mark_circle(size=120).transform_filter(alt.datum.Optimum),
                             width='stretch')
                     with c2:
                         st.write("**Recall**")
@@ -757,22 +736,39 @@ def project_metrics(df, projects):
                             tooltip=['Project', 'Limit', 'Threshold', 'Recall'],
                         )
                         st.altair_chart(
-                            base.mark_line(strokeWidth=1, opacity=0.75)
-                            + base.mark_circle(size=60).transform_filter(alt.datum.Optimum),
+                            base.mark_line(point=True)
+                            + base.mark_circle(size=120).transform_filter(alt.datum.Optimum),
                             width='stretch')
 
-                    c3, _ = st.columns(2)
-                    with c3:
-                        st.write("**F1 score**")
-                        base = alt.Chart(all_sweeps.rename(columns={'F1 score (doc avg)': 'F1 score'})).encode(
-                            x=alt.X('Threshold:Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
-                            y=alt.Y('F1 score:Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
-                            color=alt.Color('Project:N', legend=None),
-                            tooltip=['Project', 'Limit', 'Threshold', 'F1 score'],
-                        )
+                    with st.container():
+                        all_optima = pd.concat(pareto_optima_frames, ignore_index=True)
+                        all_best = pd.concat(best_frames, ignore_index=True)
+                        # thin grey lines link each project's current settings
+                        # to its best (highest F1 score) point
+                        cur_pts = all_current[['Project', 'Precision (doc avg)', 'Recall (doc avg)']]
+                        best_pts = all_best[['Project', 'Precision (doc avg)', 'Recall (doc avg)']]
+                        links = pd.concat([cur_pts, best_pts], ignore_index=True)
+                        st.write("**Recall vs Precision (Pareto)**")
                         st.altair_chart(
-                            base.mark_line(strokeWidth=1, opacity=0.75)
-                            + base.mark_circle(size=60).transform_filter(alt.datum.Optimum),
+                            alt.Chart(links).mark_line(strokeWidth=1, opacity=0.5, color='gray').encode(
+                                x=alt.X('Precision (doc avg):Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
+                                y=alt.Y('Recall (doc avg):Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
+                                detail='Project:N',
+                                tooltip=['Project'],
+                            )
+                            + alt.Chart(all_optima).mark_circle(size=60, opacity=1).encode(
+                                x=alt.X('Precision (doc avg):Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
+                                y=alt.Y('Recall (doc avg):Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
+                                color=alt.Color('Project:N', legend=None),
+                                tooltip=['Project', 'Limit', 'Threshold',
+                                         'Precision (doc avg)', 'Recall (doc avg)'],
+                            )
+                            + alt.Chart(all_current).mark_circle(size=60, opacity=1, color='#FF4B4B').encode(
+                                x=alt.X('Precision (doc avg):Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
+                                y=alt.Y('Recall (doc avg):Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
+                                tooltip=['Project', 'Limit', 'Threshold',
+                                         'Precision (doc avg)', 'Recall (doc avg)'],
+                            ),
                             width='stretch')
 
         with col2:
@@ -817,6 +813,36 @@ def project_metrics(df, projects):
                                 row["FNR"] = project.get("false_negative_rate")
                                 break
 
+                col3, col4 = st.columns(2)
+                with col3:
+                    if precision_rows:
+                        with st.container():
+                            st.write("**Precision @K**")
+                            st.altair_chart(
+                                alt.Chart(pd.DataFrame(precision_rows))
+                                .mark_line(point={"filled": True, "size": 60})
+                                .encode(
+                                    x=alt.X('k:Q', title=None),
+                                    y=alt.Y('Precision:Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
+                                    color=alt.Color('Project:N', legend=None),
+                                    tooltip=['Project', 'k', 'Precision'],
+                                ),
+                                width='stretch')
+                with col4:
+                    if ndcg_rows:
+                        with st.container():
+                            st.write("**NDCG @K**")
+                            st.altair_chart(
+                                alt.Chart(pd.DataFrame(ndcg_rows))
+                                .mark_line(point={"filled": True, "size": 60})
+                                .encode(
+                                    x=alt.X('k:Q', title=None),
+                                    y=alt.Y('NDCG:Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
+                                    color=alt.Color('Project:N', legend=None),
+                                    tooltip=['Project', 'k', 'NDCG'],
+                                ),
+                                width='stretch')
+
                 if rates:
                     rate_df = pd.DataFrame(list(rates.values()))
 
@@ -831,7 +857,7 @@ def project_metrics(df, projects):
                             detail='Project:N',
                             tooltip=['Project'],
                         )
-                        dots = alt.Chart(rate_df).mark_circle(size=100).encode(
+                        dots = alt.Chart(rate_df).mark_circle(size=60, opacity=1).encode(
                             x=alt.X('Precision:Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
                             y=alt.Y('Recall:Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
                             color=alt.Color('Project:N', legend=None),
@@ -839,36 +865,6 @@ def project_metrics(df, projects):
                                      'F1 score', 'F1@5', 'FPR', 'FNR'],
                         )
                         st.altair_chart(links + dots, width='stretch')
-
-                col3, col4 = st.columns(2)
-                with col3:
-                    if precision_rows:
-                        with st.container():
-                            st.write("**Precision @K**")
-                            st.altair_chart(
-                                alt.Chart(pd.DataFrame(precision_rows))
-                                .mark_line(strokeWidth=1, opacity=0.75, point={"filled": True, "size": 40})
-                                .encode(
-                                    x=alt.X('k:Q', title=None),
-                                    y=alt.Y('Precision:Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
-                                    color=alt.Color('Project:N', legend=None),
-                                    tooltip=['Project', 'k', 'Precision'],
-                                ),
-                                width='stretch')
-                with col4:
-                    if ndcg_rows:
-                        with st.container():
-                            st.write("**NDCG @K**")
-                            st.altair_chart(
-                                alt.Chart(pd.DataFrame(ndcg_rows))
-                                .mark_line(strokeWidth=1, opacity=0.75, point={"filled": True, "size": 40})
-                                .encode(
-                                    x=alt.X('k:Q', title=None),
-                                    y=alt.Y('NDCG:Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
-                                    color=alt.Color('Project:N', legend=None),
-                                    tooltip=['Project', 'k', 'NDCG'],
-                                ),
-                                width='stretch')
 
 def project_details(projects):
     # Get the selected row index (Streamlit stores it in session state)
@@ -890,7 +886,7 @@ def project_details(projects):
             project_form(project)
 
         with col2:
-            backend_form(project, projects.keys())
+            backend_form(project, projects.keys(), col1)
         
         # Second row for optimization and evaluation results;
         # the re-optimize / re-evaluate actions sit at the bottom of their columns
@@ -1094,7 +1090,7 @@ def vocab_form(project):
                     is_loaded = True
                     st.session_state.new_vocab = [vocab_id, lang_id]
 
-def backend_form(project, keys):
+def backend_form(project, keys, left_col):
     backend = project.get('backend')
     if not backend:
         st.error(f"Error fetching backend")
@@ -1180,16 +1176,21 @@ def backend_form(project, keys):
             response['backend']['params']['sources'] = ",".join(new_sources)
 
     # Common limit and threshold parameters below the parameter container;
-    # Annif backends define a default for limit only, so fall back to 0.0
+    # Annif backends define a default for limit only, so fall back to 0.0.
+    # They render side-by-side in the left column, below the project form
     common_params = {"limit": 100, "threshold": 0.0}
     common_params.update({k: v for k, v in default_params.items() if k in common_params})
-    for key, default_value in common_params.items():
-        param_widget(key, default_value)
 
-    if st.button("Save Configuration", type="primary"):
-        st.json(project)
-        st.json(response)
-        #save_project(response)
+    with left_col:
+        param_cols = st.columns(len(common_params))
+        for param_col, (key, default_value) in zip(param_cols, common_params.items()):
+            with param_col:
+                param_widget(key, default_value)
+
+        if st.button("Save Configuration", type="primary"):
+            st.json(project)
+            st.json(response)
+            #save_project(response)
 
 def optimize_results(project):
     if not project.get('is_optimized'):
@@ -1240,99 +1241,11 @@ def optimize_results(project):
     optimum['Limit'] = optimum['Limit'].astype(str)
 
     with st.container():
-        # Create columns for Precision/Threshold and Recall/Threshold
-        col1, col2 = st.columns(2)
-
-        with col1:
-            st.write("**Precision**")
-            st.altair_chart(
-                alt.Chart(chart_df.rename(columns={'Precision (doc avg)': 'Precision'}))
-                .mark_line(point=True)
-                .encode(
-                    x=alt.X('Threshold:Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
-                    y=alt.Y('Precision:Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
-                    color=alt.Color('Limit:N', legend=None),
-                    tooltip=['Limit', 'Threshold', 'Precision'],
-                )
-                + alt.Chart(optimum.rename(columns={'Precision (doc avg)': 'Precision'}))
-                .mark_circle(size=100)
-                .encode(
-                    x=alt.X('Threshold:Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
-                    y=alt.Y('Precision:Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
-                    color=alt.Color('Limit:N', legend=None),
-                    tooltip=['Limit', 'Threshold', 'Precision'],
-                )
-                + alt.Chart(current.rename(columns={'Precision (doc avg)': 'Precision'}))
-                .mark_circle(size=100, color='#FF4B4B')
-                .encode(
-                    x=alt.X('Threshold:Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
-                    y=alt.Y('Precision:Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
-                    tooltip=['Limit', 'Threshold', 'Precision'],
-                ),
-                width='stretch')
-
-        with col2:
-            st.write("**Recall**")
-            st.altair_chart(
-                alt.Chart(chart_df.rename(columns={'Recall (doc avg)': 'Recall'}))
-                .mark_line(point=True)
-                .encode(
-                    x=alt.X('Threshold:Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
-                    y=alt.Y('Recall:Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
-                    color=alt.Color('Limit:N', legend=None),
-                    tooltip=['Limit', 'Threshold', 'Recall'],
-                )
-                + alt.Chart(optimum.rename(columns={'Recall (doc avg)': 'Recall'}))
-                .mark_circle(size=100)
-                .encode(
-                    x=alt.X('Threshold:Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
-                    y=alt.Y('Recall:Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
-                    color=alt.Color('Limit:N', legend=None),
-                    tooltip=['Limit', 'Threshold', 'Recall'],
-                )
-                + alt.Chart(current.rename(columns={'Recall (doc avg)': 'Recall'}))
-                .mark_circle(size=100, color='#FF4B4B')
-                .encode(
-                    x=alt.X('Threshold:Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
-                    y=alt.Y('Recall:Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
-                    tooltip=['Limit', 'Threshold', 'Recall'],
-                ),
-                width='stretch')
-
-    with st.container():
-        # F1 score alongside the Pareto front, matching the row above
+        # Pareto front and F1 score in the top row
         pareto_rows = pareto_front_rows(df)
         col1, col2 = st.columns(2)
 
         with col1:
-            st.write("**F1 score**")
-            st.altair_chart(
-                alt.Chart(chart_df.rename(columns={'F1 score (doc avg)': 'F1 score'}))
-                .mark_line(point=True)
-                .encode(
-                    x=alt.X('Threshold:Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
-                    y=alt.Y('F1 score:Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
-                    color=alt.Color('Limit:N', legend=None),
-                    tooltip=['Limit', 'Threshold', 'F1 score'],
-                )
-                + alt.Chart(optimum.rename(columns={'F1 score (doc avg)': 'F1 score'}))
-                .mark_circle(size=100)
-                .encode(
-                    x=alt.X('Threshold:Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
-                    y=alt.Y('F1 score:Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
-                    color=alt.Color('Limit:N', legend=None),
-                    tooltip=['Limit', 'Threshold', 'F1 score'],
-                )
-                + alt.Chart(current.rename(columns={'F1 score (doc avg)': 'F1 score'}))
-                .mark_circle(size=100, color='#FF4B4B')
-                .encode(
-                    x=alt.X('Threshold:Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
-                    y=alt.Y('F1 score:Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
-                    tooltip=['Limit', 'Threshold', 'F1 score'],
-                ),
-                width='stretch')
-
-        with col2:
             if pareto_rows is not None:
                 # Pareto front scatter chart (Recall vs Precision) - grouped by Limit
                 pareto_scatter_by_limit = []
@@ -1366,18 +1279,106 @@ def optimize_results(project):
                             color=alt.Color('Limit:N', legend=None),
                             tooltip=['Limit', 'Threshold', 'Precision (doc avg)', 'Recall (doc avg)'],
                         )
-                        + alt.Chart(optimum).mark_circle(size=100).encode(
+                        + alt.Chart(optimum).mark_circle(size=60, opacity=1).encode(
                             x=alt.X('Precision (doc avg):Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
                             y=alt.Y('Recall (doc avg):Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
                             color=alt.Color('Limit:N', legend=None),
                             tooltip=['Limit', 'Threshold', 'Precision (doc avg)', 'Recall (doc avg)'],
                         )
-                        + alt.Chart(current).mark_circle(size=100, color='#FF4B4B').encode(
+                        + alt.Chart(current).mark_circle(size=60, opacity=1, color='#FF4B4B').encode(
                             x=alt.X('Precision (doc avg):Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
                             y=alt.Y('Recall (doc avg):Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
                             tooltip=['Limit', 'Threshold', 'Precision (doc avg)', 'Recall (doc avg)'],
                         ),
                         width='stretch')
+
+        with col2:
+            st.write("**F1 score**")
+            st.altair_chart(
+                alt.Chart(chart_df.rename(columns={'F1 score (doc avg)': 'F1 score'}))
+                .mark_line(point=True)
+                .encode(
+                    x=alt.X('Threshold:Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
+                    y=alt.Y('F1 score:Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
+                    color=alt.Color('Limit:N', legend=None),
+                    tooltip=['Limit', 'Threshold', 'F1 score'],
+                )
+                + alt.Chart(optimum.rename(columns={'F1 score (doc avg)': 'F1 score'}))
+                .mark_circle(size=120)
+                .encode(
+                    x=alt.X('Threshold:Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
+                    y=alt.Y('F1 score:Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
+                    color=alt.Color('Limit:N', legend=None),
+                    tooltip=['Limit', 'Threshold', 'F1 score'],
+                )
+                + alt.Chart(current.rename(columns={'F1 score (doc avg)': 'F1 score'}))
+                .mark_circle(size=120, color='#FF4B4B')
+                .encode(
+                    x=alt.X('Threshold:Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
+                    y=alt.Y('F1 score:Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
+                    tooltip=['Limit', 'Threshold', 'F1 score'],
+                ),
+                width='stretch')
+
+    with st.container():
+        # Precision and Recall against threshold, matching the row above
+        col1, col2 = st.columns(2)
+
+        with col1:
+            st.write("**Precision**")
+            st.altair_chart(
+                alt.Chart(chart_df.rename(columns={'Precision (doc avg)': 'Precision'}))
+                .mark_line(point=True)
+                .encode(
+                    x=alt.X('Threshold:Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
+                    y=alt.Y('Precision:Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
+                    color=alt.Color('Limit:N', legend=None),
+                    tooltip=['Limit', 'Threshold', 'Precision'],
+                )
+                + alt.Chart(optimum.rename(columns={'Precision (doc avg)': 'Precision'}))
+                .mark_circle(size=120)
+                .encode(
+                    x=alt.X('Threshold:Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
+                    y=alt.Y('Precision:Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
+                    color=alt.Color('Limit:N', legend=None),
+                    tooltip=['Limit', 'Threshold', 'Precision'],
+                )
+                + alt.Chart(current.rename(columns={'Precision (doc avg)': 'Precision'}))
+                .mark_circle(size=120, color='#FF4B4B')
+                .encode(
+                    x=alt.X('Threshold:Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
+                    y=alt.Y('Precision:Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
+                    tooltip=['Limit', 'Threshold', 'Precision'],
+                ),
+                width='stretch')
+
+        with col2:
+            st.write("**Recall**")
+            st.altair_chart(
+                alt.Chart(chart_df.rename(columns={'Recall (doc avg)': 'Recall'}))
+                .mark_line(point=True)
+                .encode(
+                    x=alt.X('Threshold:Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
+                    y=alt.Y('Recall:Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
+                    color=alt.Color('Limit:N', legend=None),
+                    tooltip=['Limit', 'Threshold', 'Recall'],
+                )
+                + alt.Chart(optimum.rename(columns={'Recall (doc avg)': 'Recall'}))
+                .mark_circle(size=120)
+                .encode(
+                    x=alt.X('Threshold:Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
+                    y=alt.Y('Recall:Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
+                    color=alt.Color('Limit:N', legend=None),
+                    tooltip=['Limit', 'Threshold', 'Recall'],
+                )
+                + alt.Chart(current.rename(columns={'Recall (doc avg)': 'Recall'}))
+                .mark_circle(size=120, color='#FF4B4B')
+                .encode(
+                    x=alt.X('Threshold:Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
+                    y=alt.Y('Recall:Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
+                    tooltip=['Limit', 'Threshold', 'Recall'],
+                ),
+                width='stretch')
 
 
 def eval_results(project):
@@ -1433,7 +1434,7 @@ def eval_results(project):
             precision_df = pd.DataFrame({"k": [1, 3, 5],
                                           "Precision": [project["Precision@1"], project["Precision@3"], project["Precision@5"]]})
             st.altair_chart(
-                alt.Chart(precision_df).mark_line(point=True).encode(
+                alt.Chart(precision_df).mark_line(point={"filled": True, "size": 60}).encode(
                     x=alt.X('k:Q', title='@k'),
                     y=alt.Y('Precision:Q', scale=alt.Scale(domain=[0.0, 1.0]), title='Precision'),
                 ),
@@ -1442,7 +1443,7 @@ def eval_results(project):
             ndcg_df = pd.DataFrame({"k": [1, 5, 10],
                                     "NDCG": [project["NDCG"], project["NDCG@5"], project["NDCG@10"]]})
             st.altair_chart(
-                alt.Chart(ndcg_df).mark_line(point=True).encode(
+                alt.Chart(ndcg_df).mark_line(point={"filled": True, "size": 60}).encode(
                     x=alt.X('k:Q', title='@k'),
                     y=alt.Y('NDCG:Q', scale=alt.Scale(domain=[0.0, 1.0]), title='NDCG'),
                 ),
