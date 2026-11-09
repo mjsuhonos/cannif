@@ -6,10 +6,12 @@ import sys
 import os
 import json
 import subprocess
+import signal
 import threading
 import time
 import tempfile
 import altair as alt
+from urllib.parse import urlparse
 
 from annif.config import find_config
 from annif.registry import AnnifRegistry
@@ -43,37 +45,47 @@ def _drain_stream(stream, buf):
 
 def start_process(key, command):
     with process_registry["lock"]:
-        if key not in process_registry["processes"]:
-            p = subprocess.Popen(
-                command,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                bufsize=1
-            )
-            stdout_lines: list[str] = []
-            stderr_lines: list[str] = []
-            t_out = threading.Thread(
-                target=_drain_stream, args=(p.stdout, stdout_lines),
-                daemon=True, name=f"{key}-stdout"
-            )
-            t_err = threading.Thread(
-                target=_drain_stream, args=(p.stderr, stderr_lines),
-                daemon=True, name=f"{key}-stderr"
-            )
-            t_out.start()
-            t_err.start()
-            process_registry["processes"][key] = {
-                "process": p,
-                "_stdout_lines": stdout_lines,
-                "_stderr_lines": stderr_lines,
-                "_t_out": t_out,
-                "_t_err": t_err,
-                "stdout": None,
-                "stderr": None,
-                "usage": None,
-                "status": None
-            }
+        entry = process_registry["processes"].get(key)
+        if entry and entry.get("status") is None:
+            return  # already running
+
+        # Replace a finished entry so a failed/completed task can be re-launched
+        process_registry["processes"].pop(key, None)
+
+        # Own process group so terminate_process can kill the whole tree;
+        # annif -j commands spawn multiprocessing pool workers that would
+        # otherwise be orphaned by a parent-only kill
+        p = subprocess.Popen(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            bufsize=1,
+            start_new_session=True
+        )
+        stdout_lines: list[str] = []
+        stderr_lines: list[str] = []
+        t_out = threading.Thread(
+            target=_drain_stream, args=(p.stdout, stdout_lines),
+            daemon=True, name=f"{key}-stdout"
+        )
+        t_err = threading.Thread(
+            target=_drain_stream, args=(p.stderr, stderr_lines),
+            daemon=True, name=f"{key}-stderr"
+        )
+        t_out.start()
+        t_err.start()
+        process_registry["processes"][key] = {
+            "process": p,
+            "_stdout_lines": stdout_lines,
+            "_stderr_lines": stderr_lines,
+            "_t_out": t_out,
+            "_t_err": t_err,
+            "stdout": None,
+            "stderr": None,
+            "usage": None,
+            "status": None
+        }
 
 def get_process(key):
     with process_registry["lock"]:
@@ -103,6 +115,21 @@ def get_process(key):
 
         return entry
 
+def _signal_process(p, sig):
+    """Send sig to the child, via its process group when the child leads
+    one (start_process runs children with setsid) so that annif's pool
+    workers die too. A child that merely shares our group — which would
+    take the app down with it — is signalled directly instead."""
+    try:
+        pgid = os.getpgid(p.pid)
+    except (ProcessLookupError, OSError):
+        pass  # Process already exited before we could signal it.
+    else:
+        try:
+            os.killpg(pgid, sig) if pgid == p.pid else os.kill(p.pid, sig)
+        except (ProcessLookupError, OSError):
+            pass
+
 def terminate_process(key):
     # Atomically remove the entry so no other caller can race against us.
     with process_registry["lock"]:
@@ -111,17 +138,41 @@ def terminate_process(key):
         return
 
     p = entry["process"]
-    try:
-        p.terminate()
-    except (ProcessLookupError, OSError):
-        pass  # Process already exited before we could signal it.
+    _signal_process(p, signal.SIGTERM)
+
     try:
         p.wait(timeout=10)
     except subprocess.TimeoutExpired:
+        _signal_process(p, signal.SIGKILL)
         p.kill()
         p.wait()
     except ChildProcessError:
         pass  # Zombie was already reaped by os.wait4 inside get_process.
+
+def stop_external_annif():
+    """Stop an Annif server this app didn't start, so the app can launch
+    and track its own instance (same user, so a plain SIGTERM suffices)."""
+    port = urlparse(ANNIF_API).port
+    try:
+        out = subprocess.run(["lsof", "-nP", "-t", f"-iTCP:{port}", "-sTCP:LISTEN"],
+                             capture_output=True, text=True, timeout=5)
+        for pid in out.stdout.split():
+            cmd = subprocess.run(["ps", "-p", pid, "-o", "command="],
+                                 capture_output=True, text=True, timeout=5).stdout
+            if "annif" in cmd.lower():
+                try:
+                    os.kill(int(pid), signal.SIGTERM)
+                except (ProcessLookupError, OSError):
+                    pass
+        # wait briefly for the port to be released
+        for _ in range(20):
+            try:
+                requests.get(ANNIF_API, timeout=1)
+                time.sleep(0.5)
+            except Exception:
+                break
+    except Exception:
+        pass
 
 def process_exit_info(entry):
     status_val = entry.get("status")
@@ -143,11 +194,17 @@ def api_request(url):
             return False
     
     if service_is_up():
-        try:
-            return requests.get(url).json()
-        except Exception as e:
-            st.error(f"Error connecting to Annif: {e}")        
-            return {}
+        entry = get_process("Annif")
+        if entry and entry.get("status") is None:
+            try:
+                return requests.get(url).json()
+            except Exception as e:
+                st.error(f"Error connecting to Annif: {e}")
+                return {}
+
+        # A server is running but this app isn't tracking it (e.g. it
+        # survived an app restart): stop it and start our own below
+        stop_external_annif()
     
     # Try to run Annif server
     st.info(f"Loading Annif...", icon=":material/hourglass:")
@@ -203,12 +260,19 @@ def get_projects():
 
         if lp := local_projects.get(project_id):
             if lp.backend:
+                params = lp.backend.params
+                defaults = lp.backend.default_params()
                 projects[project_id].update({
                     "analyzer_spec": lp.analyzer_spec,
                     "vocab_spec": lp.vocab_spec,
                     "transform_spec": lp.transform_spec,
-                    "default_params": lp.backend.default_params(),
-                    "backend_params": lp.backend.params,
+                    "default_params": defaults,
+                    "backend_params": params,
+                    # backend params come from the config file as strings,
+                    # backend defaults are typed; cast so dataframe columns
+                    # don't mix types (breaks Arrow serialization)
+                    "limit": pd.to_numeric(params.get("limit", defaults.get("limit", 100)), errors="coerce"),
+                    "threshold": pd.to_numeric(params.get("threshold", defaults.get("threshold", 0.0)), errors="coerce"),
                 })
             else:
                 projects[project_id].update({
@@ -333,7 +397,8 @@ def action_modal():
     st.write(f"**{action} {project_id}**")
 
     jobs = st.slider("Parallel jobs (`-j`)", min_value=0, max_value=os.cpu_count() or 1,
-                     value=0, step=1, help="Number of parallel jobs; 0 means all CPUs")
+                     value=1, step=1,
+                     help="Number of parallel jobs; 0 means all CPUs")
 
     if st.button(action, type="primary"):
         extra_args = ["-j", str(jobs)]
@@ -367,12 +432,6 @@ def upload_action(project_id, action, label=None):
         uploader.info(f"{label} is running", icon=":material/hourglass:")
         return
 
-    # Save upload as temporary file
-    if uploaded_file:
-        with tempfile.NamedTemporaryFile(delete=False) as tmp:
-                tmp.write(uploaded_file.read())
-                tmp_path = tmp.name
-
     if action == "Train":
         icon = ":material/model_training:"
     elif action == "Optimize":
@@ -389,7 +448,13 @@ def upload_action(project_id, action, label=None):
                 st.error("No file uploaded")
                 return
 
-        source_path = tmp_path
+        # Save the upload as a temporary file, keeping the original file
+        # extension: Annif dispatches corpus/vocab format on the extension
+        # and a bare tempfile name makes it parse everything as TSV
+        fd, source_path = tempfile.mkstemp(
+            suffix=os.path.splitext(uploaded_file.name)[1])
+        with os.fdopen(fd, "wb") as tmp:
+            tmp.write(uploaded_file.read())
 
         if action == "Load Vocab":
             vocab_id, lang = project_id.split('_', 1)
@@ -410,20 +475,12 @@ def upload_action(project_id, action, label=None):
                 file.write(f"language = {lang}\n")
                 file.write(f"vocab = {vocab_id}({lang})\n")
 
-            with st.spinner("Loading vocab..."):
-                try:
-                    result = subprocess.run(
-                        ANNIF_CMD + ["load-vocab", "-L", lang, vocab_id, source_path],
-                        capture_output=True, text=True, check=True)
-                    st.success("Vocab loaded successfully!")
+            # Load in the background so the script (and its reruns) don't
+            # block; vocab_form consumes the result once the task completes
+            start_process(task_id,
+                          ANNIF_CMD + ["load-vocab", "-L", lang, vocab_id, source_path])
 
-                    os.remove(proj_path)
-
-                except subprocess.CalledProcessError as e:
-                    st.error("Error loading vocab:")
-                    st.code(e.stderr)
-
-            uploader.write(' ') # Clear the button
+            return None
 
         else:
             st.session_state.action_launch = {
@@ -512,10 +569,11 @@ def process_dashboard():
     with process_registry["lock"]:
         items = list(process_registry["processes"].items())
 
-    if not items:
-        return
+    with st.expander(f"**{len(items)} Tasks**", expanded=False, icon=":material/manage_history:"):
+        if not items:
+            st.caption("No tasks yet — launched actions will appear here")
+            return
 
-    with st.expander("**Tasks**", expanded=False, icon=":material/manage_history:"):
         for key, entry in items:
             # Refresh process status, usage, stdout/stderr
             entry = get_process(key)
@@ -585,6 +643,8 @@ def list_projects(projects):
         "vocab_size": "Size",
         "backend": "Backend",
         "language": "Language",
+        "limit": st.column_config.NumberColumn("Limit", format="%.0f"),
+        "threshold": st.column_config.NumberColumn("Threshold", format="%.2f"),
         "modification_time": st.column_config.DatetimeColumn("Modified"),
         "is_trained": "Trained",
         "is_optimized": "Optimized",
@@ -594,7 +654,7 @@ def list_projects(projects):
         "false_negative_rate": "FNR"
     }
     column_order = ["name", "vocab", "vocab_size", "backend", "language",
-                    "modification_time", "is_trained", "is_optimized", "is_evaluated", "F1@5",
+                    "limit", "threshold", "modification_time", "is_trained", "is_optimized", "is_evaluated", "F1@5",
                     "Precision@1", "Precision@3", "Precision@5",
                     "Recall_microavg", "false_positive_rate", "false_negative_rate", 
                     "NDCG", "NDCG@5", "NDCG@10"]
@@ -635,6 +695,11 @@ def project_metrics(df, projects):
                        key=lambda kv: (kv[1].get("F1@5") is not None,
                                        kv[1].get("F1@5") or 0.0),
                        reverse=True)]
+
+    # one shared color scale so each project keeps the same color in every
+    # chart, regardless of data order or the active project filter;
+    # tableau20 matches Vega-Lite's default categorical palette
+    project_colors = alt.Scale(domain=all_names)
     selected = st.session_state.get("metric_projects")
     selected_names = set(selected) if selected else set(all_names)
 
@@ -644,6 +709,7 @@ def project_metrics(df, projects):
     current_frames = []
     sweep_frames = []
     best_frames = []
+    cloud_frames = []
     for project_id, project in projects.items():
         if not project.get('is_optimized'):
             continue
@@ -699,6 +765,12 @@ def project_metrics(df, projects):
         sweep['Project'] = name
         sweep_frames.append(sweep)
 
+        # every sweep combination (all limits), as the grey background
+        # cloud behind the Pareto front
+        cloud = opt_df[['Threshold', 'Limit', 'Precision (doc avg)', 'Recall (doc avg)']].copy()
+        cloud['Project'] = name
+        cloud_frames.append(cloud)
+
     # if there are metrics or Pareto fronts, show graphs
     has_metrics = df["F1@5"].notna().any()
 
@@ -727,6 +799,7 @@ def project_metrics(df, projects):
             pareto_frames = selected_rows(pareto_frames)
             pareto_optima_frames = selected_rows(pareto_optima_frames)
             best_frames = selected_rows(best_frames)
+            cloud_frames = selected_rows(cloud_frames)
 
         # recompute the per-chart gates on the filtered data; the expander
         # itself stays gated on the unfiltered data above
@@ -737,199 +810,209 @@ def project_metrics(df, projects):
         # identity rides along in the hover, not on the axis or a legend
         if has_metrics:
             metric_cols = {"F1@5": "F1@5",
-                           "Precision@1": "Precision@1",
-                           "Precision@3": "Precision@3",
-                           "Precision@5": "Precision@5",
                            "Recall_microavg": "Recall",
                            "false_positive_rate": "FPR",
                            "false_negative_rate": "FNR"}
-            bar_df = df.rename(columns=metric_cols)[["name"] + list(metric_cols.values())]
             # projects ordered by F1@5, best first; unevaluated
             # projects sink to the end of each metric's bars
             project_order = df.sort_values("F1@5", ascending=False, kind="stable")["name"].tolist()
-            bar_df = bar_df.melt(id_vars="name", var_name="Metric", value_name="Value")
-            bar_df = bar_df.rename(columns={"name": "Project"})
-            st.write("**Metric comparison**")
-            st.altair_chart(
-                alt.Chart(bar_df).mark_bar().encode(
-                    x=alt.X('Metric:N', sort=list(metric_cols.values()), title=None,
-                            axis=alt.Axis(labelAngle=0)),
-                    y=alt.Y('Value:Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
-                    color=alt.Color('Project:N', legend=None, sort=project_order),
-                    xOffset=alt.XOffset('Project:N', sort=project_order),
-                    tooltip=['Project', 'Metric', 'Value'],
-                ),
-                width='stretch')
+            # two outer columns, two charts side by side inside each, so
+            # all four sit on one row at the width of the charts below
+            for pair_col, metric_pair in zip(st.columns(2),
+                                              (list(metric_cols.items())[:2],
+                                               list(metric_cols.items())[2:])):
+                with pair_col:
+                    for chart_col, (key, label) in zip(st.columns(2), metric_pair):
+                        with chart_col:
+                            bar_df = df[["name", key]].rename(
+                                columns={"name": "Project", key: "Value"})
+                            st.write(f"**{label}**")
+                            st.altair_chart(
+                                alt.Chart(bar_df).mark_bar().encode(
+                                    x=alt.X('Project:N', sort=project_order, title=None,
+                                            axis=alt.Axis(labels=False, ticks=False)),
+                                    y=alt.Y('Value:Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
+                                    color=alt.Color('Project:N', legend=None, scale=project_colors),
+                                    tooltip=['Project', 'Value'],
+                                ),
+                                width='stretch')
 
-        # optimize results on the left, evaluate metrics on the right,
-        # mirroring the per-project layout
-        col1, col2 = st.columns(2)
+        # data for the charts below, prepared once
+        all_pareto = None
+        all_sweeps = None
+        all_cloud = None
+        if has_optimized:
+            # full Pareto front, sorted along the front within each
+            # project+limit so the curves connect points in order
+            all_pareto = pd.concat(pareto_frames, ignore_index=True)
+            all_pareto = all_pareto.sort_values(['Project', 'Limit', 'Precision (doc avg)'])
+            all_pareto['Limit'] = all_pareto['Limit'].astype(str)
 
-        with col1:
-            if has_optimized:
-                # threshold-sweep curves and the Pareto front, in the layout
-                # of the per-project optimized charts
-                all_sweeps = pd.concat(sweep_frames, ignore_index=True)
-                all_sweeps = all_sweeps.sort_values(['Project', 'Threshold'])
-                all_current = pd.concat(current_frames, ignore_index=True)
-                # flag the best (highest F1 score) point within each
-                # selected-limit sweep; drawn as dots on the small charts
-                best = all_sweeps.groupby('Project')['F1 score (doc avg)'].idxmax()
-                all_sweeps['Optimum'] = False
-                all_sweeps.loc[best, 'Optimum'] = True
+            # threshold-sweep curves at each project's selected limit
+            all_sweeps = pd.concat(sweep_frames, ignore_index=True)
+            all_sweeps = all_sweeps.sort_values(['Project', 'Threshold'])
+            # all sweep points, for the grey cloud behind the Pareto front
+            all_cloud = pd.concat(cloud_frames, ignore_index=True)
+            # flag the best (highest F1 score) point within each
+            # selected-limit sweep; drawn as dots on the sweep charts
+            best = all_sweeps.groupby('Project')['F1 score (doc avg)'].idxmax()
+            all_sweeps['Optimum'] = False
+            all_sweeps.loc[best, 'Optimum'] = True
 
-                with st.container():
-                    c1, c2 = st.columns(2)
-                    with c1:
-                        st.write("**Precision**")
-                        base = alt.Chart(all_sweeps.rename(columns={'Precision (doc avg)': 'Precision'})).encode(
-                            x=alt.X('Threshold:Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
+        # @k curves for all evaluated projects
+        precision_rows = []
+        ndcg_rows = []
+        for project_id, project in projects.items():
+            if not project.get("is_evaluated"):
+                continue
+            name = project.get("name") or project_id
+            for k, key in ((1, "Precision@1"), (3, "Precision@3"), (5, "Precision@5")):
+                if project.get(key) is not None:
+                    precision_rows.append({"Project": name, "k": k, "Precision": project[key]})
+            for k, key in ((1, "NDCG"), (5, "NDCG@5"), (10, "NDCG@10")):
+                if project.get(key) is not None:
+                    ndcg_rows.append({"Project": name, "k": k, "NDCG": project[key]})
+
+        # rate metrics combined into one scatter: precision vs recall,
+        # one point per project and averaging type, so the two base
+        # metrics correlate directly; F1 score and the error rates
+        # ride along in the hover
+        # longer suffixes must come first so e.g. "_weighted_subj_avg"
+        # doesn't match "_subj_avg"
+        groups = {"weighted_subj_avg": "Weighted subject avg",
+                  "doc_avg": "Document avg",
+                  "microavg": "Micro avg"}
+        rates = {}
+        for project_id, project in projects.items():
+            if not project.get("is_evaluated"):
+                continue
+            name = project.get("name") or project_id
+            for key, val in project.items():
+                for suffix, label in groups.items():
+                    if key.endswith("_" + suffix):
+                        metric = key.removesuffix("_" + suffix).replace("_", " ")
+                        row = rates.setdefault((name, label), {"Project": name, "Type": label})
+                        row[metric] = val
+                        row["F1@5"] = project.get("F1@5")
+                        row["FPR"] = project.get("false_positive_rate")
+                        row["FNR"] = project.get("false_negative_rate")
+                        break
+
+        # row 2: threshold sweeps and @k curves, four charts across
+        if has_optimized or precision_rows or ndcg_rows:
+            sweep_precision_col, sweep_recall_col, pk_col, ndcg_col = st.columns(4)
+
+            with sweep_precision_col:
+                if has_optimized:
+                    st.write("**Precision**")
+                    base = alt.Chart(all_sweeps.rename(columns={'Precision (doc avg)': 'Precision'})).encode(
+                        x=alt.X('Threshold:Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
+                        y=alt.Y('Precision:Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
+                        color=alt.Color('Project:N', legend=None, scale=project_colors),
+                        tooltip=['Project', 'Limit', 'Threshold', 'Precision'],
+                    )
+                    st.altair_chart(
+                        base.mark_line(point=True)
+                        + base.mark_circle(size=120).transform_filter(alt.datum.Optimum),
+                        width='stretch')
+
+            with sweep_recall_col:
+                if has_optimized:
+                    st.write("**Recall**")
+                    base = alt.Chart(all_sweeps.rename(columns={'Recall (doc avg)': 'Recall'})).encode(
+                        x=alt.X('Threshold:Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
+                        y=alt.Y('Recall:Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
+                        color=alt.Color('Project:N', legend=None, scale=project_colors),
+                        tooltip=['Project', 'Limit', 'Threshold', 'Recall'],
+                    )
+                    st.altair_chart(
+                        base.mark_line(point=True)
+                        + base.mark_circle(size=120).transform_filter(alt.datum.Optimum),
+                        width='stretch')
+
+            with pk_col:
+                if precision_rows:
+                    st.write("**Precision @K**")
+                    st.altair_chart(
+                        alt.Chart(pd.DataFrame(precision_rows))
+                        .mark_line(point={"filled": True, "size": 60})
+                        .encode(
+                            x=alt.X('k:Q', title=None),
                             y=alt.Y('Precision:Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
-                            color=alt.Color('Project:N', legend=None),
-                            tooltip=['Project', 'Limit', 'Threshold', 'Precision'],
+                            color=alt.Color('Project:N', legend=None, scale=project_colors),
+                            tooltip=['Project', 'k', 'Precision'],
+                        ),
+                        width='stretch')
+
+            with ndcg_col:
+                if ndcg_rows:
+                    st.write("**NDCG @K**")
+                    st.altair_chart(
+                        alt.Chart(pd.DataFrame(ndcg_rows))
+                        .mark_line(point={"filled": True, "size": 60})
+                        .encode(
+                            x=alt.X('k:Q', title=None),
+                            y=alt.Y('NDCG:Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
+                            color=alt.Color('Project:N', legend=None, scale=project_colors),
+                            tooltip=['Project', 'k', 'NDCG'],
+                        ),
+                        width='stretch')
+
+        # row 3: Pareto scatter and averages scatter
+        if has_optimized or rates:
+            pareto_col, averages_col = st.columns(2)
+
+            with pareto_col:
+                if has_optimized:
+                    all_optima = pd.concat(pareto_optima_frames, ignore_index=True)
+                    # same style as the graphs above: project-coloured front
+                    # curves with a larger dot on each project's best point
+                    st.write("**Precision vs Recall (Pareto)**")
+                    st.altair_chart(
+                        alt.Chart(all_cloud).mark_circle(size=20, opacity=0.35, color='gray').encode(
+                            x=alt.X('Recall (doc avg):Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
+                            y=alt.Y('Precision (doc avg):Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
+                            tooltip=['Project', 'Limit', 'Threshold',
+                                     'Precision (doc avg)', 'Recall (doc avg)'],
                         )
-                        st.altair_chart(
-                            base.mark_line(point=True)
-                            + base.mark_circle(size=120).transform_filter(alt.datum.Optimum),
-                            width='stretch')
-                    with c2:
-                        st.write("**Recall**")
-                        base = alt.Chart(all_sweeps.rename(columns={'Recall (doc avg)': 'Recall'})).encode(
-                            x=alt.X('Threshold:Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
-                            y=alt.Y('Recall:Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
-                            color=alt.Color('Project:N', legend=None),
-                            tooltip=['Project', 'Limit', 'Threshold', 'Recall'],
+                        + alt.Chart(all_pareto).mark_line(point=True).encode(
+                            x=alt.X('Recall (doc avg):Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
+                            y=alt.Y('Precision (doc avg):Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
+                            color=alt.Color('Project:N', legend=None, scale=project_colors),
+                            detail=['Project:N', 'Limit:N'],
+                            tooltip=['Project', 'Limit', 'Threshold',
+                                     'Precision (doc avg)', 'Recall (doc avg)'],
                         )
-                        st.altair_chart(
-                            base.mark_line(point=True)
-                            + base.mark_circle(size=120).transform_filter(alt.datum.Optimum),
-                            width='stretch')
+                        + alt.Chart(all_optima).mark_circle(size=120, opacity=1).encode(
+                            x=alt.X('Recall (doc avg):Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
+                            y=alt.Y('Precision (doc avg):Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
+                            color=alt.Color('Project:N', legend=None, scale=project_colors),
+                            tooltip=['Project', 'Limit', 'Threshold',
+                                     'Precision (doc avg)', 'Recall (doc avg)'],
+                        ),
+                        width='stretch')
 
-                    with st.container():
-                        all_optima = pd.concat(pareto_optima_frames, ignore_index=True)
-                        all_best = pd.concat(best_frames, ignore_index=True)
-                        # thin grey lines link each project's current settings
-                        # to its best (highest F1 score) point
-                        cur_pts = all_current[['Project', 'Precision (doc avg)', 'Recall (doc avg)']]
-                        best_pts = all_best[['Project', 'Precision (doc avg)', 'Recall (doc avg)']]
-                        links = pd.concat([cur_pts, best_pts], ignore_index=True)
-                        st.write("**Recall vs Precision (Pareto)**")
-                        st.altair_chart(
-                            alt.Chart(links).mark_line(opacity=0.5, color='gray').encode(
-                                x=alt.X('Precision (doc avg):Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
-                                y=alt.Y('Recall (doc avg):Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
-                                detail='Project:N',
-                                tooltip=['Project'],
-                            )
-                            + alt.Chart(all_optima).mark_circle(size=120, opacity=1).encode(
-                                x=alt.X('Precision (doc avg):Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
-                                y=alt.Y('Recall (doc avg):Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
-                                color=alt.Color('Project:N', legend=None),
-                                tooltip=['Project', 'Limit', 'Threshold',
-                                         'Precision (doc avg)', 'Recall (doc avg)'],
-                            )
-                            + alt.Chart(all_current).mark_circle(size=120, opacity=1, color='#FF4B4B').encode(
-                                x=alt.X('Precision (doc avg):Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
-                                y=alt.Y('Recall (doc avg):Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
-                                tooltip=['Project', 'Limit', 'Threshold',
-                                         'Precision (doc avg)', 'Recall (doc avg)'],
-                            ),
-                            width='stretch')
-
-        with col2:
-            if has_metrics:
-                # @k curves for all projects, in the style of the per-project
-                # evaluation charts
-                precision_rows = []
-                ndcg_rows = []
-                for project_id, project in projects.items():
-                    if not project.get("is_evaluated"):
-                        continue
-                    name = project.get("name") or project_id
-                    for k, key in ((1, "Precision@1"), (3, "Precision@3"), (5, "Precision@5")):
-                        if project.get(key) is not None:
-                            precision_rows.append({"Project": name, "k": k, "Precision": project[key]})
-                    for k, key in ((1, "NDCG"), (5, "NDCG@5"), (10, "NDCG@10")):
-                        if project.get(key) is not None:
-                            ndcg_rows.append({"Project": name, "k": k, "NDCG": project[key]})
-
-                # rate metrics combined into one scatter: recall vs precision,
-                # one point per project and averaging type, so the two base
-                # metrics correlate directly; F1 score and the error rates
-                # ride along in the hover
-                # longer suffixes must come first so e.g. "_weighted_subj_avg"
-                # doesn't match "_subj_avg"
-                groups = {"weighted_subj_avg": "Weighted subject avg",
-                          "doc_avg": "Document avg",
-                          "microavg": "Micro avg"}
-                rates = {}
-                for project_id, project in projects.items():
-                    if not project.get("is_evaluated"):
-                        continue
-                    name = project.get("name") or project_id
-                    for key, val in project.items():
-                        for suffix, label in groups.items():
-                            if key.endswith("_" + suffix):
-                                metric = key.removesuffix("_" + suffix).replace("_", " ")
-                                row = rates.setdefault((name, label), {"Project": name, "Type": label})
-                                row[metric] = val
-                                row["F1@5"] = project.get("F1@5")
-                                row["FPR"] = project.get("false_positive_rate")
-                                row["FNR"] = project.get("false_negative_rate")
-                                break
-
-                col3, col4 = st.columns(2)
-                with col3:
-                    if precision_rows:
-                        with st.container():
-                            st.write("**Precision @K**")
-                            st.altair_chart(
-                                alt.Chart(pd.DataFrame(precision_rows))
-                                .mark_line(point={"filled": True, "size": 60})
-                                .encode(
-                                    x=alt.X('k:Q', title=None),
-                                    y=alt.Y('Precision:Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
-                                    color=alt.Color('Project:N', legend=None),
-                                    tooltip=['Project', 'k', 'Precision'],
-                                ),
-                                width='stretch')
-                with col4:
-                    if ndcg_rows:
-                        with st.container():
-                            st.write("**NDCG @K**")
-                            st.altair_chart(
-                                alt.Chart(pd.DataFrame(ndcg_rows))
-                                .mark_line(point={"filled": True, "size": 60})
-                                .encode(
-                                    x=alt.X('k:Q', title=None),
-                                    y=alt.Y('NDCG:Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
-                                    color=alt.Color('Project:N', legend=None),
-                                    tooltip=['Project', 'k', 'NDCG'],
-                                ),
-                                width='stretch')
-
+            with averages_col:
                 if rates:
                     rate_df = pd.DataFrame(list(rates.values()))
-
-                    with st.container():
-                        st.write("**Recall vs Precision (Averages)**")
-                        # thin gray lines link each project's three
-                        # averaging-type values together
-                        links = alt.Chart(rate_df.sort_values(['Project', 'Type'])).mark_line(
-                                        opacity=0.5, color='gray').encode(
-                            x=alt.X('Precision:Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
-                            y=alt.Y('Recall:Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
-                            detail='Project:N',
-                            tooltip=['Project'],
-                        )
-                        dots = alt.Chart(rate_df).mark_circle(size=60, opacity=1).encode(
-                            x=alt.X('Precision:Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
-                            y=alt.Y('Recall:Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
-                            color=alt.Color('Project:N', legend=None),
-                            tooltip=['Project', 'Type', 'Precision', 'Recall',
-                                     'F1 score', 'F1@5', 'FPR', 'FNR'],
-                        )
-                        st.altair_chart(links + dots, width='stretch')
+                    st.write("**Precision vs Recall (Averages)**")
+                    # thin gray lines link each project's three
+                    # averaging-type values together
+                    links = alt.Chart(rate_df.sort_values(['Project', 'Type'])).mark_line(
+                                    opacity=0.5, color='gray').encode(
+                        x=alt.X('Recall:Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
+                        y=alt.Y('Precision:Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
+                        detail='Project:N',
+                        tooltip=['Project'],
+                    )
+                    dots = alt.Chart(rate_df).mark_circle(size=60, opacity=1).encode(
+                        x=alt.X('Recall:Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
+                        y=alt.Y('Precision:Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
+                        color=alt.Color('Project:N', legend=None, scale=project_colors),
+                        tooltip=['Project', 'Type', 'Precision', 'Recall',
+                                 'F1 score', 'F1@5', 'FPR', 'FNR'],
+                    )
+                    st.altair_chart(links + dots, width='stretch')
 
 def project_details(projects):
     # Get the selected row index (Streamlit stores it in session state)
@@ -1142,9 +1225,23 @@ def vocab_form(project):
             elif not lang_id:
                 st.error('Please select a language')
             else:
-                if upload_action(f"{vocab_id}_{lang_id}", "Load Vocab"):
-                    is_loaded = True
-                    st.session_state.new_vocab = [vocab_id, lang_id]
+                upload_action(f"{vocab_id}_{lang_id}", "Load Vocab")
+
+                # Consume the result of the background load-vocab task
+                load_task = f"Load Vocab {vocab_id}_{lang_id}"
+                entry = get_process(load_task)
+                if entry and entry.get("status") is not None:
+                    if process_exit_info(entry) == 0:
+                        is_loaded = True
+                        st.session_state.new_vocab = [vocab_id, lang_id]
+
+                        # Clean up the temporary project file and the task entry
+                        proj_path = os.path.join(os.getcwd(), find_config(), load_task + ".cfg")
+                        if os.path.exists(proj_path):
+                            os.remove(proj_path)
+                        terminate_process(load_task)  # finished; this just disposes the entry
+                    else:
+                        st.error("Vocab load failed — see Tasks for the output")
 
 def backend_form(project, keys, left_col):
     backend = project.get('backend')
@@ -1315,7 +1412,7 @@ def optimize_results(project):
 
         with col1:
             if pareto_rows is not None:
-                # Pareto front scatter chart (Recall vs Precision) - grouped by Limit
+                # Pareto front scatter chart (Precision vs Recall) - grouped by Limit
                 pareto_scatter_by_limit = []
                 for limit in limit_values:
                     limit_pareto = pareto_rows[pareto_rows['Limit'] == limit]
@@ -1328,34 +1425,34 @@ def optimize_results(project):
                     all_scatter_limit = pd.concat(pareto_scatter_by_limit, ignore_index=True)
                     # sort by precision within each Limit so the line follows the front
                     all_scatter_limit = all_scatter_limit.sort_values(['Limit', 'Precision (doc avg)'])
-                    st.write("**Recall vs Precision (Pareto)**")
+                    st.write("**Precision vs Recall (Pareto)**")
                     # grey background points: every sweep combination in
                     # recall-vs-precision space, behind the colored front
                     st.altair_chart(
                         alt.Chart(chart_df)
                         .mark_circle(size=20, opacity=0.35, color='gray')
                         .encode(
-                            x=alt.X('Precision (doc avg):Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
-                            y=alt.Y('Recall (doc avg):Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
+                            x=alt.X('Recall (doc avg):Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
+                            y=alt.Y('Precision (doc avg):Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
                             tooltip=['Limit', 'Threshold', 'Precision (doc avg)', 'Recall (doc avg)'],
                         )
                         + alt.Chart(all_scatter_limit)
                         .mark_line(point=True)
                         .encode(
-                            x=alt.X('Precision (doc avg):Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
-                            y=alt.Y('Recall (doc avg):Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
+                            x=alt.X('Recall (doc avg):Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
+                            y=alt.Y('Precision (doc avg):Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
                             color=alt.Color('Limit:N', legend=None),
                             tooltip=['Limit', 'Threshold', 'Precision (doc avg)', 'Recall (doc avg)'],
                         )
                         + alt.Chart(optimum).mark_circle(size=120, opacity=1).encode(
-                            x=alt.X('Precision (doc avg):Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
-                            y=alt.Y('Recall (doc avg):Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
+                            x=alt.X('Recall (doc avg):Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
+                            y=alt.Y('Precision (doc avg):Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
                             color=alt.Color('Limit:N', legend=None),
                             tooltip=['Limit', 'Threshold', 'Precision (doc avg)', 'Recall (doc avg)'],
                         )
                         + alt.Chart(current).mark_circle(size=120, opacity=1, color='#FF4B4B').encode(
-                            x=alt.X('Precision (doc avg):Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
-                            y=alt.Y('Recall (doc avg):Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
+                            x=alt.X('Recall (doc avg):Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
+                            y=alt.Y('Precision (doc avg):Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
                             tooltip=['Limit', 'Threshold', 'Precision (doc avg)', 'Recall (doc avg)'],
                         ),
                         width='stretch')
