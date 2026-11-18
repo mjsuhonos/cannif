@@ -705,7 +705,6 @@ def project_metrics(df, projects):
 
     # gather Pareto fronts and threshold sweeps from all optimized projects
     pareto_frames = []
-    pareto_optima_frames = []
     current_frames = []
     sweep_frames = []
     best_frames = []
@@ -720,23 +719,14 @@ def project_metrics(df, projects):
 
         name = project.get('name') or project_id
 
-        # the limit with the best F1 score drives the Pareto optima view
-        best_limit = opt_df.loc[opt_df['F1 score (doc avg)'].idxmax(), 'Limit']
-
-        # full Pareto front draws the lines; only the front points at the
-        # optimal limit become dots
+        # full Pareto front draws the lines
         pareto_rows = pareto_front_rows(opt_df)
         frame = pareto_rows[['Precision (doc avg)', 'Recall (doc avg)', 'Limit', 'Threshold']].copy()
         frame['Project'] = name
         pareto_frames.append(frame)
 
-        optima = pareto_rows[pareto_rows['Limit'] == best_limit]
-        optima = optima[['Precision (doc avg)', 'Recall (doc avg)', 'Limit', 'Threshold']].copy()
-        optima['Project'] = name
-        pareto_optima_frames.append(optima)
-
         # the project's overall best (highest F1 score) configuration;
-        # endpoint of the grey link to its current settings
+        # drawn as the single large dot on the Pareto chart
         best = opt_df.loc[[opt_df['F1 score (doc avg)'].idxmax()],
                           ['Precision (doc avg)', 'Recall (doc avg)', 'Limit', 'Threshold']].copy()
         best['Project'] = name
@@ -755,7 +745,8 @@ def project_metrics(df, projects):
         limit_rows = opt_df[opt_df['Limit'] == current_limit]
         if limit_rows.empty:
             limit_rows = opt_df[opt_df['Limit'] == opt_df.loc[opt_df['Limit'].sub(current_limit).abs().idxmin(), 'Limit']]
-        current = limit_rows.iloc[[(limit_rows['Threshold'] - current_threshold).abs().argmin()]]
+        row_idx = (limit_rows['Threshold'] - current_threshold).abs().argmin()
+        current = limit_rows.iloc[[row_idx]]
         current = current[['Precision (doc avg)', 'Recall (doc avg)', 'Limit', 'Threshold']].copy()
         current['Project'] = name
         current_frames.append(current)
@@ -797,7 +788,6 @@ def project_metrics(df, projects):
             sweep_frames = selected_rows(sweep_frames)
             current_frames = selected_rows(current_frames)
             pareto_frames = selected_rows(pareto_frames)
-            pareto_optima_frames = selected_rows(pareto_optima_frames)
             best_frames = selected_rows(best_frames)
             cloud_frames = selected_rows(cloud_frames)
 
@@ -845,6 +835,9 @@ def project_metrics(df, projects):
             # full Pareto front, sorted along the front within each
             # project+limit so the curves connect points in order
             all_pareto = pd.concat(pareto_frames, ignore_index=True)
+            # coloured front line only spans pairs with both values >= 0.5
+            all_pareto = all_pareto[(all_pareto['Precision (doc avg)'] >= 0.5)
+                                    & (all_pareto['Recall (doc avg)'] >= 0.5)]
             all_pareto = all_pareto.sort_values(['Project', 'Limit', 'Precision (doc avg)'])
             all_pareto['Limit'] = all_pareto['Limit'].astype(str)
 
@@ -858,6 +851,21 @@ def project_metrics(df, projects):
             best = all_sweeps.groupby('Project')['F1 score (doc avg)'].idxmax()
             all_sweeps['Optimum'] = False
             all_sweeps.loc[best, 'Optimum'] = True
+            # current limit/threshold per project, for the current dots
+            all_current = pd.concat(current_frames, ignore_index=True)
+
+            def current_marker(y_field, tooltip):
+                # current limit/threshold dot: the project colour darkened
+                # (opaque black underlay with a 50% project-colour overlay
+                # on top), same large size as the optimum dots
+                cur = alt.Chart(all_current.rename(columns={f'{y_field} (doc avg)': y_field})).encode(
+                    x=alt.X('Threshold:Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
+                    y=alt.Y(f'{y_field}:Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
+                )
+                return (cur.mark_circle(size=120, opacity=1, color='black')
+                        + cur.mark_circle(size=120, opacity=0.5).encode(
+                            color=alt.Color('Project:N', legend=None, scale=project_colors),
+                            tooltip=tooltip))
 
         # @k curves for all evaluated projects
         precision_rows = []
@@ -913,7 +921,8 @@ def project_metrics(df, projects):
                     )
                     st.altair_chart(
                         base.mark_line(point=True)
-                        + base.mark_circle(size=120).transform_filter(alt.datum.Optimum),
+                        + base.mark_circle(size=120).transform_filter(alt.datum.Optimum)
+                        + current_marker('Precision', ['Project', 'Limit', 'Threshold', 'Precision']),
                         width='stretch')
 
             with sweep_recall_col:
@@ -927,7 +936,8 @@ def project_metrics(df, projects):
                     )
                     st.altair_chart(
                         base.mark_line(point=True)
-                        + base.mark_circle(size=120).transform_filter(alt.datum.Optimum),
+                        + base.mark_circle(size=120).transform_filter(alt.datum.Optimum)
+                        + current_marker('Recall', ['Project', 'Limit', 'Threshold', 'Recall']),
                         width='stretch')
 
             with pk_col:
@@ -964,11 +974,12 @@ def project_metrics(df, projects):
 
             with pareto_col:
                 if has_optimized:
-                    all_optima = pd.concat(pareto_optima_frames, ignore_index=True)
+                    all_optima = pd.concat(best_frames, ignore_index=True)
                     # same style as the graphs above: project-coloured front
                     # curves with a larger dot on each project's best point
                     st.write("**Precision vs Recall (Pareto)**")
-                    st.altair_chart(
+                    # interactive(): scroll to zoom, drag to pan, double-click to reset
+                    pareto_chart = (
                         alt.Chart(all_cloud).mark_circle(size=20, opacity=0.35, color='gray').encode(
                             x=alt.X('Recall (doc avg):Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
                             y=alt.Y('Precision (doc avg):Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
@@ -989,8 +1000,23 @@ def project_metrics(df, projects):
                             color=alt.Color('Project:N', legend=None, scale=project_colors),
                             tooltip=['Project', 'Limit', 'Threshold',
                                      'Precision (doc avg)', 'Recall (doc avg)'],
-                        ),
-                        width='stretch')
+                        )
+                        # currently-configured limit/threshold: the project colour
+                        # darkened (opaque black underlay with 50% project colour
+                        # on top), drawn as a large dot
+                        + alt.Chart(all_current).mark_circle(size=120, opacity=1, color='black').encode(
+                            x=alt.X('Recall (doc avg):Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
+                            y=alt.Y('Precision (doc avg):Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
+                        )
+                        + alt.Chart(all_current).mark_circle(size=120, opacity=0.5).encode(
+                            x=alt.X('Recall (doc avg):Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
+                            y=alt.Y('Precision (doc avg):Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
+                            color=alt.Color('Project:N', legend=None, scale=project_colors),
+                            tooltip=['Project', 'Limit', 'Threshold',
+                                     'Precision (doc avg)', 'Recall (doc avg)'],
+                        )
+                    ).interactive()
+                    st.altair_chart(pareto_chart, width='stretch')
 
             with averages_col:
                 if rates:
@@ -1405,9 +1431,24 @@ def optimize_results(project):
     optimum = df.loc[[df['F1 score (doc avg)'].idxmax()]].copy()
     optimum['Limit'] = optimum['Limit'].astype(str)
 
+    def current_dot(df, y_field, tooltip):
+        # current limit/threshold marker on the threshold charts: the limit
+        # colour darkened (opaque black underlay with a 50% limit-colour
+        # overlay on top), same size as the optimum dot
+        base = alt.Chart(df).encode(
+            x=alt.X('Threshold:Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
+            y=alt.Y(f'{y_field}:Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
+        )
+        return (base.mark_circle(size=120, opacity=1, color='black')
+                + base.mark_circle(size=120, opacity=0.5).encode(
+                    color=alt.Color('Limit:N', legend=None),
+                    tooltip=tooltip))
+
     with st.container():
         # Pareto front and F1 score in the top row
         pareto_rows = pareto_front_rows(df)
+        current = current.copy()
+        current['Limit'] = current['Limit'].astype(str)
         col1, col2 = st.columns(2)
 
         with col1:
@@ -1423,12 +1464,16 @@ def optimize_results(project):
 
                 if pareto_scatter_by_limit:
                     all_scatter_limit = pd.concat(pareto_scatter_by_limit, ignore_index=True)
+                    # coloured front line only spans pairs with both values >= 0.5
+                    all_scatter_limit = all_scatter_limit[(all_scatter_limit['Precision (doc avg)'] >= 0.5)
+                                                          & (all_scatter_limit['Recall (doc avg)'] >= 0.5)]
                     # sort by precision within each Limit so the line follows the front
                     all_scatter_limit = all_scatter_limit.sort_values(['Limit', 'Precision (doc avg)'])
                     st.write("**Precision vs Recall (Pareto)**")
                     # grey background points: every sweep combination in
                     # recall-vs-precision space, behind the colored front
-                    st.altair_chart(
+                    # interactive(): scroll to zoom, drag to pan, double-click to reset
+                    pareto_chart = (
                         alt.Chart(chart_df)
                         .mark_circle(size=20, opacity=0.35, color='gray')
                         .encode(
@@ -1450,12 +1495,21 @@ def optimize_results(project):
                             color=alt.Color('Limit:N', legend=None),
                             tooltip=['Limit', 'Threshold', 'Precision (doc avg)', 'Recall (doc avg)'],
                         )
-                        + alt.Chart(current).mark_circle(size=120, opacity=1, color='#FF4B4B').encode(
+                        # current limit/threshold: the limit colour darkened
+                        # (opaque black underlay with 50% limit colour on top),
+                        # drawn as a large dot
+                        + alt.Chart(current).mark_circle(size=120, opacity=1, color='black').encode(
                             x=alt.X('Recall (doc avg):Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
                             y=alt.Y('Precision (doc avg):Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
+                        )
+                        + alt.Chart(current).mark_circle(size=120, opacity=0.5).encode(
+                            x=alt.X('Recall (doc avg):Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
+                            y=alt.Y('Precision (doc avg):Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
+                            color=alt.Color('Limit:N', legend=None),
                             tooltip=['Limit', 'Threshold', 'Precision (doc avg)', 'Recall (doc avg)'],
-                        ),
-                        width='stretch')
+                        )
+                    ).interactive()
+                    st.altair_chart(pareto_chart, width='stretch')
 
         with col2:
             st.write("**F1 score**")
@@ -1476,13 +1530,8 @@ def optimize_results(project):
                     color=alt.Color('Limit:N', legend=None),
                     tooltip=['Limit', 'Threshold', 'F1 score'],
                 )
-                + alt.Chart(current.rename(columns={'F1 score (doc avg)': 'F1 score'}))
-                .mark_circle(size=120, color='#FF4B4B')
-                .encode(
-                    x=alt.X('Threshold:Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
-                    y=alt.Y('F1 score:Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
-                    tooltip=['Limit', 'Threshold', 'F1 score'],
-                ),
+                + current_dot(current.rename(columns={'F1 score (doc avg)': 'F1 score'}),
+                              'F1 score', ['Limit', 'Threshold', 'F1 score']),
                 width='stretch')
 
     with st.container():
@@ -1508,13 +1557,8 @@ def optimize_results(project):
                     color=alt.Color('Limit:N', legend=None),
                     tooltip=['Limit', 'Threshold', 'Precision'],
                 )
-                + alt.Chart(current.rename(columns={'Precision (doc avg)': 'Precision'}))
-                .mark_circle(size=120, color='#FF4B4B')
-                .encode(
-                    x=alt.X('Threshold:Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
-                    y=alt.Y('Precision:Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
-                    tooltip=['Limit', 'Threshold', 'Precision'],
-                ),
+                + current_dot(current.rename(columns={'Precision (doc avg)': 'Precision'}),
+                              'Precision', ['Limit', 'Threshold', 'Precision']),
                 width='stretch')
 
         with col2:
@@ -1536,13 +1580,8 @@ def optimize_results(project):
                     color=alt.Color('Limit:N', legend=None),
                     tooltip=['Limit', 'Threshold', 'Recall'],
                 )
-                + alt.Chart(current.rename(columns={'Recall (doc avg)': 'Recall'}))
-                .mark_circle(size=120, color='#FF4B4B')
-                .encode(
-                    x=alt.X('Threshold:Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
-                    y=alt.Y('Recall:Q', scale=alt.Scale(domain=[0.0, 1.0]), title=None),
-                    tooltip=['Limit', 'Threshold', 'Recall'],
-                ),
+                + current_dot(current.rename(columns={'Recall (doc avg)': 'Recall'}),
+                              'Recall', ['Limit', 'Threshold', 'Recall']),
                 width='stretch')
 
 
